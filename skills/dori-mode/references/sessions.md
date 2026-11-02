@@ -41,6 +41,21 @@ Done = command ["bun","test"] stdout~" 0 fail"; file qa/report.json json:.passed
 
 Work no script can check (a design review, a judgement call) stays in the lane's own plan. You judge it yourself before the claim.
 
+## Running on herdr-core (`hc`)
+
+With `"mux": "hc"` in the config, the scripts drive herdr-core instead of herdr: `laneWorkspace`/`workspaces` hold Herdr app space ids and panes are hc terminal addresses (`t7`). Lanes open as labelled terminals in that space (`herdr.space`, `dori.lane`) and outlive the lead. hc reports the agent state (`idle`, `working`, `blocked`, `done`) itself; it becomes the pane's `agent_status`. When you work a session by hand, use the hc equivalents:
+
+| herdr | hc |
+|---|---|
+| `herdr pane list` | `hc ls` |
+| `herdr pane read <id> --source recent-unwrapped --lines 40` | `hc read <t> --lines 40` |
+| `herdr pane send-text <id> <text>` + `send-keys <id> enter` | `hc send <t> <text>` (presses Enter itself) |
+| `herdr pane send-keys <id> <key>` | `hc keys <t> <key>` (`esc`, not `escape`) |
+| `herdr pane process-info --pane <id>` | `hc get <t>` (`pid`, `foreground`, `status`) |
+| `herdr pane close <id>` | `hc kill <t>`, then `hc rm <t>` |
+
+Lanes report with `hc send <lead terminal> "[REPORT] ..."`; `$HC_TERMINAL_ID` is a session's own address.
+
 ## The registry
 
 One JSON file per lane under `<stateDir>/lanes/`, written atomically (temp file + rename), so two writers never leave a half-written file. Each lane records:
