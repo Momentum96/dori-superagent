@@ -1,4 +1,4 @@
-import type { GuardThresholds } from "./config.ts";
+import type { GuardThresholds, Mux } from "./config.ts";
 import type { Runner } from "./run.ts";
 
 export type HostSample = {
@@ -14,7 +14,15 @@ const num = (s: string | undefined, fallback: number): number => {
   return Number.isFinite(n) ? n : fallback;
 };
 
-export const sampleHost = async (run: Runner, dataPath = "/"): Promise<HostSample> => {
+/** Live terminals on this machine; another machine's terminals (`macmini/t3`) are not counted. -1 when hc does not answer. */
+const hcPanes = async (run: Runner): Promise<number> => {
+  const ls = await run(["hc", "ls", "--json"]);
+  if (ls.code !== 0) return -1;
+  const terminals = (JSON.parse(ls.out) as { terminals?: { address: string; state?: string }[] }).terminals ?? [];
+  return terminals.filter((t) => t.state === "live" && !t.address.includes("/")).length;
+};
+
+export const sampleHost = async (run: Runner, dataPath = "/", mux: Mux = "herdr"): Promise<HostSample> => {
   const load = await run(["sysctl", "-n", "vm.loadavg"]);
   const loadLinux = load.code === 0 ? null : await run(["cat", "/proc/loadavg"]);
   const load1 = num((load.code === 0 ? load.out.replace(/[{}]/g, "").trim() : loadLinux?.out ?? "").split(/\s+/)[0], 0);
@@ -28,8 +36,12 @@ export const sampleHost = async (run: Runner, dataPath = "/"): Promise<HostSampl
   const diskFreeGb = num(df.out.split("\n").at(-1)?.trim().split(/\s+/)[3], 0) / 1_048_576;
   const swap = await run(["sysctl", "-n", "vm.swapusage"]);
   const swapFreeGb = swap.code === 0 ? num(/free = ([\d.]+)M/.exec(swap.out)?.[1], 0) / 1024 : num(String(kb("SwapFree")), 0) / 1_048_576;
-  const pl = await run(["herdr", "pane", "list"]);
-  const panes = pl.code === 0 ? (JSON.parse(pl.out) as { result: { panes: unknown[] } }).result.panes.length : -1;
+  let panes: number;
+  if (mux === "hc") panes = await hcPanes(run);
+  else {
+    const pl = await run(["herdr", "pane", "list"]);
+    panes = pl.code === 0 ? (JSON.parse(pl.out) as { result: { panes: unknown[] } }).result.panes.length : -1;
+  }
   return { load1, memFreePct, diskFreeGb, swapFreeGb, panes };
 };
 

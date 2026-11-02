@@ -80,6 +80,38 @@ describe("pane messaging", () => {
     expect(lead.received[0]).toContain("[REPORT] a-lane | milestone | tests red, investigating");
   });
 
+  test("a report sent while its lane is still starting reaches a busy lead after the lane's [START]", async () => {
+    const { w, d, lead, brief } = setup();
+    lead.status = "working";
+    // launch waits for the agent to come up before [START] is sent; this lane reports during that wait.
+    const slow = { ...d, flow: { ...d.flow, clock: { now: d.flow.clock.now, sleep: async (ms: number) => { w.clock += ms; await report(slow, "early", "brief read, starting"); } } } };
+    await startLane(slow, "early", brief, { done: `file ${brief}` });
+    expect(lead.received).toEqual([]);
+    lead.status = "idle";
+    await dutyTick(slow);
+    expect(lead.received).toHaveLength(1);
+    const batch = lead.received[0]!;
+    expect(batch.indexOf("[START early]")).toBeGreaterThan(-1);
+    expect(batch.indexOf("[START early]")).toBeLessThan(batch.indexOf("[REPORT] early | milestone | brief read, starting"));
+  });
+
+  test("a message that arrives while the inbox is being delivered stays queued", async () => {
+    const { w, d, lead } = setup();
+    const mux = new Proxy(d.mux, {
+      get(t, k) {
+        if (k === "deliver") return async (pane: string, text: string, st: Parameters<typeof t.deliver>[2]) => {
+          await t.deliver(pane, text, st);
+          d.store.enqueue(pane, { at: w.clock, from: "a-lane", text: "late" });
+        };
+        const v = Reflect.get(t, k);
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+    });
+    expect(await send({ ...d, mux }, "lead", "first", "cli")).toBe("DELIVERED");
+    expect(lead.received).toEqual(["first"]);
+    expect(d.store.queued("w1:p1").map((m) => m.text)).toEqual(["late"]);
+  });
+
   test("unknown targets are refused instead of guessed; roles.json overrides the config's lead", async () => {
     const { w, d } = setup();
     await expect(send(d, "nobody", "hi", "cli")).rejects.toThrow("unknown target");
@@ -111,6 +143,43 @@ describe("duty loop", () => {
     expect(await dutyTick(d, mem)).toContainEqual({ lane: "silent", action: "lost" });
     expect(lead.received.at(-1)).toStartWith("[LOST silent]");
     expect((await dutyTick(d, mem)).filter((e) => e.action === "lost")).toEqual([]);
+  });
+
+  test("an [ESCALATE] queued for a busy lead is dropped once the lane claims done; the claim still arrives", async () => {
+    const { w, d, lead, open } = setup({ nudgeAfterMin: 15 });
+    await open("claims");
+    const mem = newDutyMemory();
+    w.clock += 16 * MIN;
+    expect(await dutyTick(d, mem)).toContainEqual({ lane: "claims", action: "freshness nudged" });
+    lead.status = "working";
+    lead.received.length = 0;
+    w.clock += 16 * MIN;
+    expect(await dutyTick(d, mem)).toContainEqual({ lane: "claims", action: "escalated" });
+    await ready(d, "claims", "finished", ["https://github.com/o/r/pull/2"]);
+    lead.status = "idle";
+    w.clock += 16 * MIN;
+    expect((await dutyTick(d, mem)).filter((e) => e.action === "escalated")).toEqual([]);
+    expect(lead.received).toEqual(["[READY claims] finished\nevidence: https://github.com/o/r/pull/2"]);
+    expect(d.store.queued("w1:p1")).toEqual([]);
+  });
+
+  test("on hc a lane with no recorded report counts its terminal's last state change as heard", async () => {
+    const { w, d, open } = setup({ nudgeAfterMin: 15, mux: "hc" });
+    const { lane } = await open("legacy");
+    const pane = w.panes.get(lane.pane!)!;
+    let statusMs = w.clock;
+    w.hc = (argv) => (argv[0] === "get" && argv[1] === lane.pane ? { code: 0, stdout: JSON.stringify({ state: "live", status_ms: statusMs }) } : { code: 1, stdout: "" });
+    const mem = newDutyMemory();
+    w.clock += 10 * MIN;
+    statusMs = w.clock; // it reported with `hc send` and went idle; the registry never saw that report
+    w.clock += 10 * MIN;
+    expect((await dutyTick(d, mem)).filter((e) => e.lane === "legacy")).toEqual([]);
+    expect(pane.received).toEqual([]);
+    w.clock += 6 * MIN;
+    expect(await dutyTick(d, mem)).toContainEqual({ lane: "legacy", action: "freshness nudged" });
+    statusMs = w.clock + MIN; // it took a turn on the nudge
+    w.clock += 16 * MIN;
+    expect((await dutyTick(d, mem)).filter((e) => e.action === "escalated")).toEqual([]);
   });
 
   test("a dead lane pane goes to the duty session; the duty session and loop panes are never swept", async () => {
@@ -177,6 +246,33 @@ describe("dori up", () => {
     expect(revived[2]).toContain(`(replaced ${loopPane})`);
     expect(w.panes.has(loopPane)).toBe(false);
     expect(w.calls.filter((c) => c.argv[0] === "workspace")).toEqual([]);
+  });
+});
+
+describe("dori up after an agent update", () => {
+  test("an idle duty session on an older agent version is replaced; a busy one waits until it is idle", async () => {
+    const { w, d } = setup();
+    let version = "omo 5.1.54 (engine: a)";
+    w.reviewer = (argv) => (argv[0] === "--version" ? { code: 0, stdout: `${version}\n` } : { code: 0, stdout: "VERDICT: CLEAR" });
+    await up(d, "/repo");
+    const first = d.store.roles().duty!;
+    expect(d.store.dutyAgent()).toEqual({ pane: first, version: "omo 5.1.54 (engine: a)" });
+    expect((await up(d, "/repo"))[1]).toBe(`DUTY ${first} idle`);
+
+    version = "omo 5.1.55 (engine: b)";
+    w.panes.get(first)!.status = "working";
+    expect((await up(d, "/repo"))[1]).toBe(`DUTY ${first} working; it runs omo 5.1.54 (engine: a), installed is omo 5.1.55 (engine: b): replaced once it is idle`);
+    expect(w.panes.has(first)).toBe(true);
+
+    w.panes.get(first)!.status = "idle";
+    const line = (await up(d, "/repo"))[1];
+    const second = d.store.roles().duty!;
+    expect(second).not.toBe(first);
+    expect(line).toBe(`DUTY started ${second} (replaced ${first}: it ran omo 5.1.54 (engine: a), installed is omo 5.1.55 (engine: b))`);
+    expect(w.panes.has(first)).toBe(false);
+    expect(w.panes.get(second)!.ran[0]).toMatch(/^omo --append-system-prompt .*duty\.md'$/);
+    expect(d.store.dutyAgent()).toEqual({ pane: second, version });
+    expect((await up(d, "/repo"))[1]).toBe(`DUTY ${second} idle`);
   });
 });
 

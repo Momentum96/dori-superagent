@@ -3,14 +3,14 @@ import { join, resolve } from "node:path";
 import { loadConfig } from "../skills/dori-mode/scripts/src/config.ts";
 import { deadPaneTick, newDeadPaneState, type DeadPaneState } from "../skills/dori-mode/scripts/src/dead-panes.ts";
 import { claimDone, closeLane, type FlowDeps } from "../skills/dori-mode/scripts/src/done-flow.ts";
-import { freshnessTick } from "../skills/dori-mode/scripts/src/freshness.ts";
+import { freshnessTick, heardAt } from "../skills/dori-mode/scripts/src/freshness.ts";
 import { hcRunner } from "../skills/dori-mode/scripts/src/hc-runner.ts";
 import { launchLane, LaunchError } from "../skills/dori-mode/scripts/src/launch.ts";
 import { type Lane, type LaneStatus, Registry, statusOf } from "../skills/dori-mode/scripts/src/registry.ts";
 import { realClock, run as spawnRun, type Runner } from "../skills/dori-mode/scripts/src/run.ts";
 import { shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
 import { muxFor, type Mux } from "./mux.ts";
-import { Store, type Role } from "./store.ts";
+import { Store, type QueuedMessage, type Role } from "./store.ts";
 
 // Lanes live in Dori mode's registry (<stateDir>/lanes): `dori start` is `dori launch` plus a [START] to the lead,
 // `dori ready` is a done claim, `dori done` is a close. So sync, freshness, dead-panes, the thread hooks and the
@@ -88,14 +88,28 @@ export async function resolveTarget(d: Deps, target: string): Promise<string> {
 }
 
 /** Delivers now when the pane can read; otherwise queues it for the duty loop (busy agents are never interrupted). */
-export async function send(d: Deps, target: string, text: string, from: string): Promise<"DELIVERED" | "QUEUED"> {
+export type SendOptions = { readonly at?: number; readonly lane?: string };
+
+export async function send(d: Deps, target: string, text: string, from: string, opts: SendOptions = {}): Promise<"DELIVERED" | "QUEUED"> {
   const paneId = await resolveTarget(d, target);
-  d.store.enqueue(paneId, { at: d.now(), from, text });
+  d.store.enqueue(paneId, { at: opts.at ?? d.now(), from, text, ...(opts.lane ? { lane: opts.lane } : {}) });
   return (await flushInbox(d, paneId)) ? "DELIVERED" : "QUEUED";
 }
 
+const stillWorking = async (d: Deps, key: string): Promise<boolean> => {
+  const lane = await d.flow.registry.read(key);
+  return !!lane && statusOf(lane) === "working";
+};
+
 export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
-  const queued = d.store.queued(paneId);
+  const read = d.store.queued(paneId);
+  if (read.length === 0) return true;
+  // An [ESCALATE] queued while the lead was busy is stale once its lane claimed done or closed.
+  const stale: QueuedMessage[] = [];
+  for (const m of read) if (m.lane && !(await stillWorking(d, m.lane))) stale.push(m);
+  if (stale.length > 0) d.store.dequeue(paneId, stale);
+  // Oldest first by time stamp: a [START] carries its lane's open time, so a report sent while the lane was starting follows it.
+  const queued = read.filter((m) => !stale.includes(m)).sort((a, b) => a.at - b.at);
   if (queued.length === 0) return true;
   const status = await d.mux.status(paneId);
   if (status === "gone") throw new Refusal(`pane ${paneId} is gone; ${queued.length} message(s) kept in its inbox`);
@@ -106,20 +120,20 @@ export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
       : `${queued.length} messages arrived while you were busy:\n\n` +
         queued.map((m, i) => `(${i + 1}) from ${m.from}:\n${m.text}`).join("\n\n");
   await d.mux.deliver(paneId, body, status);
-  d.store.clearInbox(paneId);
+  d.store.dequeue(paneId, queued);
   return true;
 }
 
-async function tell(d: Deps, target: "lead" | "duty", text: string, from: string): Promise<void> {
+async function tell(d: Deps, target: "lead" | "duty", text: string, from: string, opts: SendOptions = {}): Promise<void> {
   try {
-    await send(d, target, text, from);
+    await send(d, target, text, from, opts);
   } catch (e) {
     if (!(e instanceof Refusal)) throw e;
     process.stderr.write(`dori: ${e.message}; message kept: ${text.slice(0, 120)}\n`);
   }
 }
 
-const tellLead = (d: Deps, text: string, from: string) => tell(d, "lead", text, from);
+const tellLead = (d: Deps, text: string, from: string, opts: SendOptions = {}) => tell(d, "lead", text, from, opts);
 const tellDuty = (d: Deps, text: string, from: string) => (d.store.roles().duty ? tell(d, "duty", text, from) : tellLead(d, text, from));
 
 // ---------- lanes (Dori mode's registry) ----------
@@ -134,7 +148,8 @@ export async function startLane(d: Deps, key: string, briefFile: string, opts: S
     if (e instanceof LaunchError) throw new Refusal(e.message);
     throw e;
   }
-  await tellLead(d, `[START ${key}] lane opened in ${r.lane.pane ?? "?"}: ${r.startup}`, key);
+  // Stamped with the open time: the lane may report during the startup check, before this line is sent.
+  await tellLead(d, `[START ${key}] lane opened in ${r.lane.pane ?? "?"}: ${r.startup}`, key, { at: Date.parse(r.lane.openedAt) });
   return r;
 }
 
@@ -220,11 +235,12 @@ export async function dutyTick(d: Deps, mem: DutyMemory = newDutyMemory()): Prom
         continue;
       }
       const nudged = lane.lastNudgeAt ?? 0;
-      const heard = lane.lastReplyAt ?? Date.parse(lane.openedAt);
       const waitMs = d.flow.config.nudgeAfterMin * 60_000;
-      if (statusOf(lane) !== "working" || nudged <= heard || now - nudged < waitMs || (lane.escalatedAt ?? 0) >= nudged) continue;
+      if (statusOf(lane) !== "working" || nudged === 0 || now - nudged < waitMs || (lane.escalatedAt ?? 0) >= nudged) continue;
+      const heard = await heardAt(d.flow, lane);
+      if (nudged <= heard) continue;
       await d.flow.registry.write({ ...lane, escalatedAt: now });
-      await tellLead(d, `[ESCALATE ${lane.key}] no report for ${Math.round((now - heard) / 60_000)} min, and none since the nudge ${Math.round((now - nudged) / 60_000)} min ago`, "duty");
+      await tellLead(d, `[ESCALATE ${lane.key}] no report for ${Math.round((now - heard) / 60_000)} min, and none since the nudge ${Math.round((now - nudged) / 60_000)} min ago`, "duty", { lane: lane.key });
       events.push({ lane: lane.key, action: "escalated" });
     }
   });
@@ -247,6 +263,14 @@ export async function dutyTick(d: Deps, mem: DutyMemory = newDutyMemory()): Prom
   return events;
 }
 
+/** First line of `<agent> --version` (omo prints its engine too), or undefined when it cannot be read. */
+async function agentVersion(d: Deps): Promise<string | undefined> {
+  const bin = d.agentCmd.trim().split(/\s+/)[0];
+  if (!bin) return undefined;
+  const r = await d.exec(bin, ["--version"]).catch((e: unknown) => ({ code: -1, stdout: "", stderr: String(e) }));
+  return r.code === 0 ? r.stdout.trim().split("\n")[0] || undefined : undefined;
+}
+
 export type WatchState = { stale: boolean };
 
 /** For the lead's persistent monitor: one DUTY_STALE when the loop stops beating, one DUTY_OK when it is back. */
@@ -266,7 +290,8 @@ export function dutyWatchTick(d: Deps, staleMs: number, state: WatchState): stri
 /**
  * Idempotent: safe to run every minute (ensure-lead.sh does). It never starts a second lead: a configured lead that is
  * gone is left to its own restarter. It starts the duty session when it is gone, restarts its agent when only a shell
- * is left, and replaces the duty loop when its heartbeat is older than three intervals.
+ * is left, replaces an idle duty session that runs an older agent version than the installed one, and replaces the
+ * duty loop when its heartbeat is older than three intervals.
  */
 export async function up(d: Deps, cwd: string, intervalSec = 60): Promise<string[]> {
   const out: string[] = [];
@@ -285,16 +310,30 @@ export async function up(d: Deps, cwd: string, intervalSec = 60): Promise<string
   }
   const dutyCmd = `${d.agentCmd} --append-system-prompt ${shq(renderPrompt(d, "duty.md"))}`;
   const duty = d.store.roles().duty;
-  const dutySt: AgentStatus = duty ? await d.mux.status(duty) : "gone";
+  let dutySt: AgentStatus = duty ? await d.mux.status(duty) : "gone";
+  const version = await agentVersion(d);
+  const ran = d.store.dutyAgent();
+  const ranVersion = ran && ran.pane === duty ? ran.version : "an unrecorded version";
+  // After an agent update the duty session keeps the old one until it restarts; replace it only while it is idle.
+  const outdated = !!duty && dutySt !== "gone" && dutySt !== "shell" && !!version && ranVersion !== version;
+  let replaced = "";
+  if (outdated && (dutySt === "idle" || dutySt === "done")) {
+    await d.mux.close(duty!);
+    replaced = ` (replaced ${duty}: it ran ${ranVersion}, installed is ${version})`;
+    dutySt = "gone";
+  }
   if (dutySt === "gone") {
     const made = await d.mux.createTab("duty", cwd, workspace, env);
     await d.mux.run(made.paneId, dutyCmd);
     d.store.setRole("duty", made.paneId);
-    out.push(`DUTY started ${made.paneId}`);
+    if (version) d.store.setDutyAgent({ pane: made.paneId, version });
+    out.push(`DUTY started ${made.paneId}${replaced}`);
   } else if (dutySt === "shell") {
     await d.mux.run(duty!, dutyCmd);
+    if (version) d.store.setDutyAgent({ pane: duty!, version });
     out.push(`DUTY restarted in ${duty}`);
-  } else out.push(`DUTY ${duty} ${dutySt}`);
+  } else if (outdated) out.push(`DUTY ${duty} ${dutySt}; it runs ${ranVersion}, installed is ${version}: replaced once it is idle`);
+  else out.push(`DUTY ${duty} ${dutySt}${version ? "" : "; agent version unknown, update check skipped"}`);
   const beat = d.store.heartbeat();
   if (beat && d.now() - beat.at < 3 * beat.intervalMs) {
     out.push(`LOOP alive, beat ${Math.round((d.now() - beat.at) / 1000)} s ago`);

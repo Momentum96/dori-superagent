@@ -13,7 +13,7 @@ Paths below use `~`. "The lead terminal" is the hc terminal in `leadPane` of `~/
 | Duty loop | `dori duty --interval 60`: inbox delivery, `[LOST]`, the freshness sweep (nudge + thread post), the dead-pane sweep, `[ESCALATE]`, a heartbeat | hc terminal `duty-loop`, same space | `dori up` (replaces it when the heartbeat is older than three intervals) |
 | Lanes | one registry, `~/.dori/state/lanes`, whether opened with `dori launch` or `dori start` | their own hc terminals in the lane space | the lead |
 
-`dori up` is idempotent and never starts a second lead: when the configured lead is gone it says so and leaves it to `ensure-lead.sh`. It starts the duty session when its terminal is gone, restarts the agent when only a shell is left, and replaces the loop when it stopped beating. So it is safe to run every minute.
+`dori up` is idempotent and never starts a second lead: when the configured lead is gone it says so and leaves it to `ensure-lead.sh`. It starts the duty session when its terminal is gone, restarts the agent when only a shell is left, replaces an idle duty session that runs an older agent than `omo --version` reports now (a busy one waits until it is idle), and replaces the loop when it stopped beating. So it is safe to run every minute.
 
 ### Who notices when the duty loop dies
 
@@ -31,7 +31,7 @@ Two independent paths, so lane monitoring cannot stop silently the way the lead'
 
 ### State
 
-Lanes stay in Dori mode's `stateDir` (`~/.dori/state`). What only the harness has (roles, pane inboxes, rendered prompts, review receipts, the duty heartbeat) is in `~/.dori/harness` (`DORI_HOME`). The lane schema only gains optional fields (`lastReport`, `lostReportedAt`, `escalatedAt`), which the old code ignores.
+Lanes stay in Dori mode's `stateDir` (`~/.dori/state`). What only the harness has (roles, pane inboxes, rendered prompts, review receipts, the duty heartbeat, the duty session's agent version) is in `~/.dori/harness` (`DORI_HOME`). The lane schema only gains optional fields (`lastReport`, `lostReportedAt`, `escalatedAt`), which the old code ignores.
 
 ## Before you start
 
@@ -73,7 +73,7 @@ Lanes stay in Dori mode's `stateDir` (`~/.dori/state`). What only the harness ha
      DORI_AGENT_CMD="omo --offline --model $MODEL" dori up --cwd "$HOME/.dori" >>"$STATE/dori-up.log" 2>&1 || notify "dori up failed; see $STATE/dori-up.log"
      ```
      It is safe while the lead is down: `dori up` reports a gone lead and leaves its relaunch to the lines above it.
-   - `restart-on-omo-update.sh`: no change needed for the lead. The duty session runs the same omo, so after an omo update stop its agent (`hc keys <duty terminal> ctrl+c`, or `/quit`). The next `dori up` run restarts it on the new version.
+   - `restart-on-omo-update.sh`: no change needed. The duty session runs the same omo; `dori up` records the version it started the duty session with (`~/.dori/harness/duty-agent.json`) and replaces the session once it is idle and the installed omo differs, so the next `ensure-lead.sh` tick after an update moves it to the new version.
    - Check with `grep -n 'dori ' ~/.dori/integration/*.sh` that nothing else calls the `dori` CLI.
 7. **monitors.json.** The duty loop now runs freshness and dead-panes, so the lead must stop running them or every quiet lane would be nudged twice:
    - remove the dead-pane monitor (`dori dead-panes --loop 3`);
@@ -106,6 +106,23 @@ Lanes stay in Dori mode's `stateDir` (`~/.dori/state`). What only the harness ha
 12. **Shared skill copy.** `~/.agents/skills/dori-mode` is tracked in the shared skills repository and synced to every machine. Update it once, after every machine has switched its CLI (step 3 on each); until then each lead reads the skill from `~/.dori/superagent` (step 8).
     - To update: copy `skills/dori-mode` from this repository into the skills repository, commit and push, then pull on each machine as that repository's own sync procedure says.
     - Do not replace the folder with a symlink; it would break the shared copy on the other machines.
+
+## 후속 적용
+
+Follow-ups found after the three machines switched to 8c29902 (inbox order, done-claimed escalations, legacy-lane escalations, the hc pane count, the duty session after an omo update). They need no config change. On each machine, after the PR is merged:
+
+1. `git -C ~/.dori/superagent pull --ff-only`.
+2. The running processes keep the old code until they restart. Stop the duty loop once (`hc kill <duty-loop terminal>`, from `~/.dori/harness/roles.json`); the next `dori up` replaces it once its heartbeat is stale (within 3 minutes, with one `DUTY_STALE` / `DUTY_OK` pair at the lead).
+3. Re-arm the host guard monitor (`dori guard --loop 1`, filter `^HOST_GUARD`) following the re-arm rule in LEAD.md.
+
+The first `dori up` after the pull finds no `duty-agent.json`, so it replaces the duty session once, as soon as it is idle. After that it replaces it only after an omo update.
+
+Per machine, the one-line change to its restart scripts:
+
+- MacBook: none. `ensure-lead.sh` already runs `dori up` every minute (launchd `ai.dori.ensure-lead`), which moves the duty session to the new omo within a minute of it going idle. `restart-on-omo-update.sh` stays as it is.
+- Mac mini: none, for the same reason (its `ensure-lead.sh` runs `dori up` on the launchd tick).
+- hosthatch: none. Its systemd timer (`dori-ensure-lead.timer`) runs `ensure-lead.sh`, which already runs `dori up`.
+- Optional, any machine, to apply right after an update instead of on the next tick: append to `restart-on-omo-update.sh`, after the lead relaunch, `DORI_AGENT_CMD="omo --offline --model $MODEL" dori up --cwd "$HOME/.dori" >>"$STATE/dori-up.log" 2>&1`.
 
 ## Rollback
 

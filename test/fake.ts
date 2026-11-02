@@ -18,6 +18,7 @@ export class World {
   next = 1;
   gh: (argv: readonly string[]) => { code: number; stdout: string } = () => ({ code: 1, stdout: "" });
   reviewer: (argv: readonly string[]) => { code: number; stdout: string } = () => ({ code: 0, stdout: "VERDICT: CLEAR" });
+  hc: (argv: readonly string[]) => { code: number; stdout: string } = () => ({ code: 1, stdout: "" });
 
   addPane(id: string, status: AgentStatus = "idle", tab = "w1:t1"): Pane {
     const p = { status, tab, received: [], ran: [], screen: "" };
@@ -35,6 +36,7 @@ export class World {
     if (cmd === "gh") return { ...this.gh(argv), stderr: "" };
     if (cmd === "notify") return { code: 0, stdout: "", stderr: "" };
     if (cmd === "git") return { code: 1, stdout: "", stderr: "not a repository" };
+    if (cmd === "hc") return { ...this.hc(argv), stderr: "" };
     if (cmd !== "herdr") return { ...this.reviewer(argv), stderr: "" };
     const [group, verb, id] = argv;
     if ((group === "tab" || group === "workspace") && verb === "create") {
