@@ -18,9 +18,9 @@ const fakeHc = (w: Hc): Runner => async (argv) => {
     { address: "t6", cwd: "/tmp" },
     { address: "macmini/t1", agent: "omo", status: "idle", cwd: "/b" },
   ] });
-  if (verb === "get" && target === "t1") return ok({ pid: 11, title: "omo - lead", labels: { "herdr.space": "sp1", "herdr.tab": "tb1" }, foreground: { name: "omo" } });
-  if (verb === "get" && target === "t4") return ok({ pid: 44, name: "demo", labels: { "herdr.space": "sp1", "dori.lane": "demo" }, foreground: { name: "omo" } });
-  if (verb === "get" && target === "t6") return ok({ pid: 66, labels: {}, foreground: { name: "zsh" } });
+  if (verb === "get" && target === "t1") return ok({ pid: 11, title: "omo - lead", status: { app: "omo", state: "idle" }, labels: { "herdr.space": "sp1", "herdr.tab": "tb1" }, foreground: { name: "omo" } });
+  if (verb === "get" && target === "t4") return ok({ pid: 44, name: "demo", status: w.lane.status ? { app: "omo", state: w.lane.status } : null, labels: { "herdr.space": "sp1", "dori.lane": "demo" }, foreground: { name: "omo" } });
+  if (verb === "get" && target === "t6") return ok({ pid: 66, status: null, labels: {}, foreground: { name: "zsh" } });
   if (verb === "run") return ok({ address: "t9", state: "live" });
   if (verb === "read") return ok(`line1\nline2\n${w.screen}\n\n`);
   if (verb === "send") w.lane.status = "working";
@@ -64,6 +64,15 @@ test("sendVerified types once through hc send, drops the duplicate Enter, and co
   const w = world("idle");
   expect(await sendVerified(hcRunner(fakeHc(w)), fakeClock(0), "t4", "[LEAD] hello there")).toBe("delivered");
   expect(w.calls.filter((c) => c[1] === "send" || c[1] === "keys")).toEqual([["hc", "send", "t4", "[LEAD] hello there"]]);
+});
+
+test("text for a terminal that runs no agent is refused, not typed: in a shell it would run as a command", async () => {
+  const w = world();
+  const r = await hcRunner(fakeHc(w))(["herdr", "pane", "send-text", "t6", "[LEAD] your work thread has had no update"]);
+  expect(r.code).toBe(1);
+  expect(r.err).toContain("runs no agent");
+  expect(w.calls.some((c) => c[1] === "send")).toBe(false);
+  expect(await sendVerified(hcRunner(fakeHc(w)), fakeClock(0), "t6", "hello")).toBe("failed");
 });
 
 test("Escape from pause becomes hc's esc key; other keys pass through", async () => {

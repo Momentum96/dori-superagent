@@ -7,6 +7,7 @@ import type { Ran, Runner } from "./run.ts";
 type HcListed = { readonly address: string; readonly agent?: string | null; readonly status?: string | null; readonly cwd?: string };
 type HcDetail = {
   readonly pid?: number;
+  readonly status?: { readonly app?: string | null; readonly state?: string | null } | null;
   readonly title?: string | null;
   readonly name?: string | null;
   readonly labels?: Readonly<Record<string, string>>;
@@ -85,6 +86,11 @@ export const hcRunner = (run: Runner, hc = "hc"): Runner => {
         return r.code === 0 && lines ? { ...r, out: lastLines(r.out, lines) } : r;
       }
       case "pane send-text": {
+        // Text pasted into a plain shell runs as a command, so only a terminal whose agent reports a status gets it.
+        const got = await run([hc, "get", target, "--json"]);
+        if (got.code !== 0) return got;
+        const st = (JSON.parse(got.out) as HcDetail).status;
+        if (!st?.app && !st?.state) return fail(`hc terminal ${target} runs no agent; text not typed`);
         const r = await run([hc, "send", target, argv[4] ?? ""]);
         if (r.code === 0) enterOwed = target;
         return r;

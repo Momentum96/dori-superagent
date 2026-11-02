@@ -54,7 +54,7 @@ With `"mux": "hc"` in the config, the scripts drive herdr-core instead of herdr:
 | `herdr pane process-info --pane <id>` | `hc get <t>` (`pid`, `foreground`, `status`) |
 | `herdr pane close <id>` | `hc kill <t>`, then `hc rm <t>` |
 
-Lanes report with `hc send <lead terminal> "[REPORT] ..."`; `$HC_TERMINAL_ID` is a session's own address.
+Lanes report with `dori report <key> --kind <kind> --text "..."`, which records the line on the lane (freshness posts the last one to the thread from there, since it never shows on the lane's own screen) and delivers it to the lead. `hc send` only reaches a terminal whose agent reports a state; text for a plain shell is refused. `$HC_TERMINAL_ID` is a session's own address.
 
 ## The registry
 

@@ -74,6 +74,8 @@ Arm these as persistent monitors in your own session:
 | Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |
 | presence (optional) | `dori presence slack` or `dori presence discord` | `^PRESENCE_READY` |
 
+With the harness's duty session (`dori up`, see the repository README), the duty loop runs the dead-pane and freshness sweeps itself. Then leave those two monitors out, so no lane is nudged twice, and arm `dori duty-watch --loop 1` (filter `^DUTY_`) instead: it says `DUTY_STALE` when the loop stops, and `dori up` brings it back.
+
 ## 6. First look around
 
 Once the bot is live, explore the machine: running coding-agent sessions, the tools in use, recent logs. Write what you find into memory, and adopt any running lanes with `dori adopt`.

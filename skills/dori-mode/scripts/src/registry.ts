@@ -30,6 +30,8 @@ export type Lane = {
   readonly lastReplyAt?: number;
   readonly lastNudgeAt?: number;
   readonly lastAutoReplyAt?: number;
+  /** The lane's last [REPORT] line as recorded by `dori report`; freshness reads this before the screen. */
+  readonly lastReport?: string;
   /** The [REPORT] line the freshness sweep last posted, so a stale screen is never posted twice. */
   readonly lastPostedReport?: string;
   /** The [REPORT] line seen on the previous freshness tick (a line is posted only once it holds across two ticks). */
@@ -40,6 +42,10 @@ export type Lane = {
   readonly pausedSeenWorking?: boolean;
   /** The status a paused lane had before it was paused; `resume` restores it. */
   readonly pausedFrom?: LaneStatus;
+  /** When the harness duty loop reported this lane's pane gone ([LOST]), so it is reported once. */
+  readonly lostReportedAt?: string;
+  /** When the duty loop escalated a nudge the lane never answered, so each nudge escalates once. */
+  readonly escalatedAt?: number;
   readonly receipt?: unknown;
 };
 

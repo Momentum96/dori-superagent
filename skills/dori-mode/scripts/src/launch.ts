@@ -31,9 +31,7 @@ export const footer = (lane: Lane, leadPane: string, mux: Mux = "herdr"): string
   "## Lane footer (written by dori launch)",
   `- Key: ${lane.key}. Work thread: ${lane.thread}.`,
   `- Done = ${lane.done}. The lane closes only when every signal reads back live.`,
-  mux === "hc"
-    ? `- Report to the lead at each milestone: [REPORT] ${lane.key} | <milestone|blocker|question|done> | <what, with links>, sent with \`hc send ${leadPane || "(lead terminal)"} "<report>"\` as an argv array, never a shell string.`
-    : `- Report to the lead at each milestone: [REPORT] ${lane.key} | <milestone|blocker|question|done> | <what, with links>, sent to pane ${leadPane || "(lead pane)"} as an argv array, never a shell string.`,
+  `- Report to the lead at each milestone: \`dori report ${lane.key} --kind <milestone|blocker|question|done> --text "<what, with links>"\`. It prints [REPORT] ${lane.key} | <kind> | <what> and reaches the lead ${mux === "hc" ? "terminal" : "pane"} ${leadPane || "(lead)"} even while it is busy. Without that command, send the same line to the lead as an argv array, never a shell string.`,
   `- When done: dori claim-done ${lane.key} --evidence "<merge SHA, closed issue, version>". See references/done-protocol.md.`,
   "",
 ].join("\n");

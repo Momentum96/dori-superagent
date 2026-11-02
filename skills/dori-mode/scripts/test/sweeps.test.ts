@@ -110,6 +110,15 @@ test("a posted [REPORT] line is saved: the same line on later ticks is stale, lo
   expect(world.calls.filter((c) => c[0] === "notify")).toHaveLength(1);
 });
 
+test("a recorded report (dori report) is posted from the registry at once, with no [REPORT] line on the pane and no screen read", async () => {
+  const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
+  await deps(T0).registry.write({ ...working, lastNudgeAt: T0 + MIN, lastReport: "[REPORT] quiet-lane | milestone | PR open, checks green" });
+  world.screen = "just thinking\n❯ ";
+  expect((await freshnessTick(deps(T0 + 21 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["posted"]);
+  expect(world.calls.filter((c) => c[0] === "notify")).toEqual([["notify", "chat:team/9", "Progress (from the lane's last report): PR open, checks green"]]);
+  expect(world.calls.some((c) => c[0] === "herdr" && c[2] === "read")).toBe(false);
+});
+
 test("a quiet lane with no [REPORT] line logs NO-REPORT once, not on every tick", async () => {
   const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
   await deps(T0).registry.write({ ...working, lastNudgeAt: T0 + MIN });
