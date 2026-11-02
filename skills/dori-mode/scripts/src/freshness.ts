@@ -21,7 +21,19 @@ export const scrubForThread = (line: string, home: string): string =>
 
 export type SweepAct = { readonly kind: "nudged" | "posted" | "no-report" | "pending-report" | "stale-report" | "working-while-paused"; readonly lane: string; readonly detail: string };
 
-const lastHeard = (lane: Lane): number => lane.lastReplyAt ?? Date.parse(lane.openedAt);
+/**
+ * When the lane was last heard from: its last recorded report, else its open time. A lane with no recorded report
+ * (it reports with `hc send`, which never reaches the registry) also counts its terminal's last agent state change
+ * on hc (`status_ms`) as activity, so it is not nudged and escalated on its open time alone.
+ */
+export const heardAt = async (deps: FlowDeps, lane: Lane): Promise<number> => {
+  const base = lane.lastReplyAt ?? Date.parse(lane.openedAt);
+  if (lane.lastReport || deps.config.mux !== "hc" || !lane.pane) return base;
+  const got = await deps.run(["hc", "get", lane.pane, "--json"]);
+  if (got.code !== 0) return base;
+  const changed = (JSON.parse(got.out) as { status_ms?: unknown }).status_ms;
+  return typeof changed === "number" && changed > base ? changed : base;
+};
 
 export const freshnessTick = async (deps: FlowDeps, home: string): Promise<SweepAct[]> => {
   const acts: SweepAct[] = [];
@@ -37,7 +49,7 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
       continue;
     }
     if (statusOf(lane) !== "working" || !lane.pane) continue;
-    const heard = lastHeard(lane);
+    const heard = await heardAt(deps, lane);
     const silentMin = Math.round((now - heard) / 60_000);
     let current = lane;
     if (silentMin >= deps.config.nudgeAfterMin && (current.lastNudgeAt ?? 0) < heard) {

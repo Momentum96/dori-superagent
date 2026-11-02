@@ -8,7 +8,8 @@ import { join } from "node:path";
 
 export type Role = "lead" | "duty" | "duty-loop";
 
-export type QueuedMessage = { at: number; from: string; text: string };
+/** `lane`: the message is about that lane only while it is still working (an [ESCALATE]); flushing drops it after a done claim. */
+export type QueuedMessage = { at: number; from: string; text: string; lane?: string };
 
 export type ReviewReceipt = {
   pr: string;
@@ -20,6 +21,8 @@ export type ReviewReceipt = {
 };
 
 export type Heartbeat = { at: number; pid: number; intervalMs: number };
+
+export type DutyAgent = { pane: string; version: string };
 
 export class Store {
   // Kept apart from Dori mode's state (~/.dori/state, ~/.dori/config.json).
@@ -59,8 +62,11 @@ export class Store {
     return readFileSync(p, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as QueuedMessage);
   }
 
-  clearInbox(paneId: string): void {
-    writeFileSync(this.inboxPath(paneId), "");
+  /** Removes these messages and keeps any that arrived after they were read. */
+  dequeue(paneId: string, taken: readonly QueuedMessage[]): void {
+    const gone = new Set(taken.map((m) => JSON.stringify(m)));
+    const left = this.queued(paneId).filter((m) => !gone.delete(JSON.stringify(m)));
+    writeFileSync(this.inboxPath(paneId), left.map((m) => JSON.stringify(m) + "\n").join(""));
   }
 
   inboxPanes(): string[] {
@@ -84,6 +90,15 @@ export class Store {
 
   beat(h: Heartbeat): void {
     this.writeJson(join(this.root, "duty-heartbeat.json"), h);
+  }
+
+  /** The agent version (`omo --version`) the duty session in `pane` was started with. */
+  setDutyAgent(a: DutyAgent): void {
+    this.writeJson(join(this.root, "duty-agent.json"), a);
+  }
+
+  dutyAgent(): DutyAgent | undefined {
+    return this.readJson(join(this.root, "duty-agent.json"));
   }
 
   heartbeat(): Heartbeat | undefined {

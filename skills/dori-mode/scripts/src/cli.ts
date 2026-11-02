@@ -157,7 +157,7 @@ try {
       const state = { alerting: false };
       console.log("HOST_GUARD_READY");
       await every(loopMin, async () => {
-        for (const line of guardTick(await sampleHost(run), config.guard, state)) console.log(line);
+        for (const line of guardTick(await sampleHost(run, "/", config.mux), config.guard, state)) console.log(line);
       });
       break;
     }
@@ -166,7 +166,7 @@ try {
       const label = rest[0];
       const cmd = sep >= 0 ? rest.slice(sep + 1) : [];
       if (!label || label === "--" || !cmd.length) die("usage: dori heavy <label> -- <command ...>");
-      const load = async () => (await sampleHost(run)).load1;
+      const load = async () => (await sampleHost(run, "/", config.mux)).load1;
       const slot = await acquireSlot({ dir: `${config.stateDir}/heavy`, slots: config.heavySlots, maxLoad: config.heavyMaxLoad, clock: realClock, load, alive: pidAlive, pid: process.pid }, label ?? "");
       try {
         const child = Bun.spawn(cmd, { stdout: "inherit", stderr: "inherit", stdin: "inherit" });
@@ -177,7 +177,7 @@ try {
       break;
     }
     case "can-launch": {
-      const v = canLaunch(await sampleHost(run), config.guard);
+      const v = canLaunch(await sampleHost(run, "/", config.mux), config.guard);
       console.log(v.ok ? "CAN_LAUNCH" : `HOLD ${v.reasons.join(" | ")}`);
       process.exit(v.ok ? 0 : 4);
     }
