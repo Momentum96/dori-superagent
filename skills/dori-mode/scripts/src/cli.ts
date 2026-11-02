@@ -7,10 +7,11 @@ import { claimDone, closeLane, type FlowDeps, objectDone, watchTick } from "./do
 import { freshnessTick } from "./freshness.ts";
 import { acquireSlot, pidAlive, releaseSlot } from "./heavy-slot.ts";
 import { guardTick, sampleHost } from "./host-guard.ts";
+import { hcRunner } from "./hc-runner.ts";
 import { adoptLane, launchLane, LaunchError } from "./launch.ts";
 import { pauseLane, resumeLane } from "./pause.ts";
 import { Registry, statusOf } from "./registry.ts";
-import { realClock, run } from "./run.ts";
+import { realClock, run as spawnRun } from "./run.ts";
 import { syncRegistry } from "./sync.ts";
 import { canLaunch } from "./routing.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
@@ -28,7 +29,7 @@ const USAGE = `dori <command> [options]
   launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" [--thread REF] [--model M] [--cwd DIR]
   adopt  <key> --pane ID --title T --brief FILE --done "..." [--thread REF]
   sync   [--write]                     registry vs live panes; read-only unless --write
-  claim-done [<key>] --evidence TEXT  key defaults to the lane registered for $HERDR_PANE_ID
+  claim-done [<key>] --evidence TEXT  key defaults to the lane registered for $HERDR_PANE_ID ($HC_TERMINAL_ID with mux hc)
   object-done <key> --reason TEXT [--reason TEXT ...]
   close  <key> [--note TEXT]           close now (Done signals must read back live)
   pause  <key> [--note TEXT]           the owner said wait: goal paused (read back), running turn stopped, no nudges; exit 3 if unconfirmed
@@ -52,6 +53,8 @@ const die = (message: string, code = 1): never => {
 };
 
 const config = await loadConfig();
+const run = config.mux === "hc" ? hcRunner(spawnRun) : spawnRun;
+const ownPane = (config.mux === "hc" ? process.env.HC_TERMINAL_ID : process.env.HERDR_PANE_ID) ?? "";
 const deps: FlowDeps = { run, clock: realClock, registry: new Registry(config.stateDir), config };
 const [command = "", ...rest] = process.argv.slice(2);
 
@@ -75,7 +78,7 @@ const key = flags.positionals[0];
 const loopMin = Number(opt("loop") ?? 0);
 
 const lane = async (k: string | undefined) => {
-  const found = k ? await deps.registry.read(k) : await deps.registry.byPane(process.env.HERDR_PANE_ID ?? "");
+  const found = k ? await deps.registry.read(k) : await deps.registry.byPane(ownPane);
   if (!found) return die(k ? `no registered lane "${k}"` : "no open lane is registered for this pane");
   if (statusOf(found) === "closed") return die(`lane ${found.key} is already closed`);
   return found;

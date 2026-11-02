@@ -48,13 +48,15 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
     }
     const hook = deps.config.hooks.threadReply;
     if (silentMin >= deps.config.postAfterMin && hook && lane.thread !== "none" && (current.lastAutoReplyAt ?? 0) < heard) {
-      const report = lastReportLine(await readScreen(deps.run, lane.pane, 200), lane.key);
+      // A recorded report (dori report) is final; a line read off the screen counts only once it holds for a tick.
+      const recorded = current.lastReport ?? null;
+      const report = recorded ?? lastReportLine(await readScreen(deps.run, lane.pane, 200), lane.key);
       // The two reads are a full loop interval apart: a line counts only once it is still there on the next tick.
       const seenBefore = current.lastSeenReport;
       current = { ...current, lastSeenReport: report ?? undefined };
       let hold: { kind: SweepAct["kind"]; detail: string } | null = null;
-      if (!report) hold = { kind: "no-report", detail: "pane has no [REPORT] line" };
-      else if (report !== seenBefore) hold = { kind: "pending-report", detail: "a new [REPORT] line; posting once it holds on the next tick" };
+      if (!report) hold = { kind: "no-report", detail: "no recorded report and no [REPORT] line on the pane" };
+      else if (!recorded && report !== seenBefore) hold = { kind: "pending-report", detail: "a new [REPORT] line; posting once it holds on the next tick" };
       else if (report === current.lastPostedReport) hold = { kind: "stale-report", detail: "the last [REPORT] line was already posted" };
       if (hold) {
         const note = `${hold.kind}|${hold.detail}|${report ?? ""}`;

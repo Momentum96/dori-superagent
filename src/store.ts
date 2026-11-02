@@ -1,24 +1,12 @@
-import { mkdirSync, readdirSync, existsSync, appendFileSync, readFileSync, writeFileSync, renameSync } from "node:fs";
+import { mkdirSync, existsSync, appendFileSync, readFileSync, readdirSync, writeFileSync, renameSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export type LaneStatus = "working" | "waiting" | "ready" | "done" | "lost";
+// Lanes are not kept here: they live in Dori mode's registry (<stateDir>/lanes, see src/harness.ts).
+// This store holds what only the harness has: roles, inboxes, rendered prompts, review receipts and the
+// duty loop's heartbeat.
 
-export type Lane = {
-  key: string;
-  paneId: string;
-  tabId: string;
-  brief: string;
-  cwd: string;
-  status: LaneStatus;
-  createdAt: number;
-  lastActivityAt: number;
-  nudges: number;
-  final?: { text: string; evidence: string[]; at: number };
-  log: { at: number; kind: "start" | "report" | "ready" | "nudge" | "done" | "lost"; text: string }[];
-};
-
-export type Role = "lead" | "duty";
+export type Role = "lead" | "duty" | "duty-loop";
 
 export type QueuedMessage = { at: number; from: string; text: string };
 
@@ -31,9 +19,12 @@ export type ReviewReceipt = {
   summary: string;
 };
 
+export type Heartbeat = { at: number; pid: number; intervalMs: number };
+
 export class Store {
-  constructor(readonly root: string = process.env["DORI_HOME"] ?? join(homedir(), ".dori")) {
-    for (const d of ["lanes", "inbox", "briefs", "receipts"]) mkdirSync(join(root, d), { recursive: true });
+  // Kept apart from Dori mode's state (~/.dori/state, ~/.dori/config.json).
+  constructor(readonly root: string = process.env["DORI_HOME"] ?? join(homedir(), ".dori", "harness")) {
+    for (const d of ["inbox", "receipts"]) mkdirSync(join(root, d), { recursive: true });
   }
 
   private readJson<T>(path: string): T | undefined {
@@ -46,26 +37,6 @@ export class Store {
     renameSync(tmp, path);
   }
 
-  lane(key: string): Lane | undefined {
-    return this.readJson<Lane>(join(this.root, "lanes", `${key}.json`));
-  }
-
-  saveLane(lane: Lane): void {
-    this.writeJson(join(this.root, "lanes", `${lane.key}.json`), lane);
-  }
-
-  lanes(): Lane[] {
-    return readdirSync(join(this.root, "lanes"))
-      .filter((f) => f.endsWith(".json"))
-      .map((f) => this.readJson<Lane>(join(this.root, "lanes", f)))
-      .filter((l): l is Lane => l !== undefined)
-      .sort((a, b) => a.createdAt - b.createdAt);
-  }
-
-  laneByPane(paneId: string): Lane | undefined {
-    return this.lanes().find((l) => l.paneId === paneId && l.status !== "done");
-  }
-
   roles(): Partial<Record<Role, string>> {
     return this.readJson(join(this.root, "roles.json")) ?? {};
   }
@@ -74,12 +45,8 @@ export class Store {
     this.writeJson(join(this.root, "roles.json"), { ...this.roles(), [role]: paneId });
   }
 
-  briefPath(key: string): string {
-    return join(this.root, "briefs", `${key}.md`);
-  }
-
   private inboxPath(paneId: string): string {
-    return join(this.root, "inbox", `${paneId.replaceAll(":", "_")}.jsonl`);
+    return join(this.root, "inbox", `${paneId.replaceAll(":", "_").replaceAll("/", "__")}.jsonl`);
   }
 
   enqueue(paneId: string, msg: QueuedMessage): void {
@@ -99,7 +66,7 @@ export class Store {
   inboxPanes(): string[] {
     return readdirSync(join(this.root, "inbox"))
       .filter((f) => f.endsWith(".jsonl"))
-      .map((f) => f.slice(0, -".jsonl".length).replaceAll("_", ":"))
+      .map((f) => f.slice(0, -".jsonl".length).replaceAll("__", "/").replaceAll("_", ":"))
       .filter((p) => this.queued(p).length > 0);
   }
 
@@ -113,5 +80,13 @@ export class Store {
 
   receipt(pr: string, sha: string): ReviewReceipt | undefined {
     return this.readJson(this.receiptPath(pr, sha));
+  }
+
+  beat(h: Heartbeat): void {
+    this.writeJson(join(this.root, "duty-heartbeat.json"), h);
+  }
+
+  heartbeat(): Heartbeat | undefined {
+    return this.readJson(join(this.root, "duty-heartbeat.json"));
   }
 }

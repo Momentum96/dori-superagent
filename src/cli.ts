@@ -2,26 +2,47 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
-  defaultDeps, done, dutyTick, mergeGate, ready, Refusal, report, review, send, startLane, ROLES, type Deps,
+  defaultDeps, done, dutyTick, dutyWatchTick, leadPane, mergeGate, newDutyMemory, ready, Refusal, report, review, send, startLane, up, ROLES, type Deps,
 } from "./harness.ts";
-import { shq } from "./herdr.ts";
+import { statusOf } from "../skills/dori-mode/scripts/src/registry.ts";
 import type { Role } from "./store.ts";
 
-const USAGE = `dori - a proactive multi-session harness on herdr + omo
+const SKILL_CLI = join(import.meta.dir, "..", "skills", "dori-mode", "scripts", "src", "cli.ts");
+const SKILL_COMMANDS: ReadonlySet<string> = new Set([
+  "launch", "adopt", "sync", "claim-done", "object-done", "close", "pause", "resume", "watch", "freshness",
+  "dead-panes", "guard", "heavy", "can-launch", "presence", "transcribe", "inbound",
+]);
+const MESSENGERS: ReadonlySet<string> = new Set(["slack", "telegram", "discord"]);
 
-  dori up [--cwd DIR]                         open lead + duty panes in a new herdr workspace
+/** Dori mode owns these commands; `send` is Dori mode's only when it names a messenger. */
+export const isSkillCommand = (argv: readonly string[]): boolean => {
+  const [cmd, x] = argv;
+  if (cmd === undefined) return false;
+  return SKILL_COMMANDS.has(cmd) || (cmd === "send" && x !== undefined && MESSENGERS.has(x));
+};
+
+const USAGE = `dori - a proactive multi-session harness on herdr (or hc) + omo
+
+  dori up [--cwd DIR] [--interval SECONDS]    make sure lead, duty session and duty loop run; never starts a
+                                              second lead (lead = roles.json or config leadPane). Safe every minute
   dori role <lead|duty> [PANE]                register a pane as lead or duty (default: this pane)
-  dori start <key> --brief FILE [--cwd DIR]   open a lane: new tab, omo session, brief + lane rules
-  dori report <key> --text T [--status working|waiting]
-  dori ready <key> --text T --evidence LINK [--evidence LINK ...]
-  dori send <lead|duty|key|pane> --text T     deliver now, or queue until the pane is idle
-  dori duty [--once] [--interval SECONDS]     flush inboxes, nudge idle lanes, escalate, detect lost lanes
+  dori start <key> --brief FILE --done "SIGNALS" [--title T] [--thread REF] [--cwd DIR] [--model M]
+                                              open a lane (same as dori launch) and tell the lead
+  dori report <key> --text T [--kind milestone|blocker|question|done]
+  dori ready <key> --text T --evidence LINK [--evidence LINK ...]   a done claim with the final answer
+  dori send <lead|duty|key|pane> --text T     deliver now, or queue until the pane is an idle agent
+  dori duty [--once] [--interval SECONDS]     inbox, LOST, freshness, dead panes, escalations; writes a heartbeat
+  dori duty-watch [--loop MIN] [--stale-min N]  DUTY_STALE when the duty loop's heartbeat is older than N min
   dori review <owner/repo#N> [--model M]      fresh omo reviewer at the exact head -> receipt
   dori merge <owner/repo#N> [--dry-run]       CLEAR receipt at head + green checks -> squash merge
-  dori done <key>                             lead closes a READY lane
+  dori done <key>                             close a lane now (its Done signals must read back live)
   dori status
 
---text may be omitted to read the message from stdin.`;
+--text may be omitted to read the message from stdin.
+Multiplexer: DORI_MUX=herdr|hc, or "mux" in ~/.dori/config.json (default herdr).
+
+Dori mode commands run the skill's CLI (skills/dori-mode/scripts, also installed as dori-mode):
+  ${[...SKILL_COMMANDS].join(", ")}, send <slack|telegram|discord>. Run: dori-mode help`;
 
 type Args = { pos: string[]; flags: Map<string, string[]> };
 
@@ -52,82 +73,72 @@ async function textOf(a: Args): Promise<string> {
   return (await Bun.stdin.text()).trim();
 }
 
-function renderPrompt(d: Deps, name: string): string {
-  const dir = join(d.store.root, "prompts");
-  mkdirSync(dir, { recursive: true });
-  const src = readFileSync(join(import.meta.dir, "..", "prompts", name), "utf8").replaceAll("{{dori}}", d.doriCmd);
-  const out = join(dir, name);
-  writeFileSync(out, src);
-  return out;
-}
-
-async function up(d: Deps, cwd: string): Promise<void> {
-  const env = { DORI_HOME: d.store.root };
-  const lead = await d.herdr.createWorkspace("dori", cwd);
-  await d.herdr.run(lead.paneId, `${d.agentCmd} --append-system-prompt ${shq(renderPrompt(d, "lead.md"))}`);
-  d.store.setRole("lead", lead.paneId);
-  const duty = await d.herdr.createTab("duty", cwd, lead.workspaceId, env);
-  await d.herdr.run(duty.paneId, `${d.agentCmd} --append-system-prompt ${shq(renderPrompt(d, "duty.md"))}`);
-  d.store.setRole("duty", duty.paneId);
-  const loop = await d.herdr.split(duty.paneId, cwd, env);
-  await d.herdr.run(loop.paneId, `${d.doriCmd} duty --interval 60`);
-  console.log(`UP lead=${lead.paneId} duty=${duty.paneId} loop=${loop.paneId} home=${d.store.root}`);
-}
-
-function status(d: Deps): void {
+async function status(d: Deps): Promise<void> {
   const roles = d.store.roles();
-  console.log(`lead=${roles.lead ?? "-"} duty=${roles.duty ?? "-"} home=${d.store.root}`);
-  for (const l of d.store.lanes()) {
-    const last = l.log.at(-1);
-    const age = Math.round((d.now() - l.lastActivityAt) / 60_000);
-    console.log(`${l.key.padEnd(24)} ${l.status.padEnd(8)} ${l.paneId.padEnd(8)} active ${age}m ago  ${last ? `${last.kind}: ${last.text.slice(0, 60)}` : ""}`);
+  const beat = d.store.heartbeat();
+  console.log(`lead=${leadPane(d) ?? "-"} duty=${roles.duty ?? "-"} loop=${roles["duty-loop"] ?? "-"} beat=${beat ? `${Math.round((d.now() - beat.at) / 1000)}s ago` : "-"} home=${d.store.root}`);
+  for (const l of await d.flow.registry.open()) {
+    const heard = l.lastReplyAt ?? Date.parse(l.openedAt);
+    console.log(`${l.key.padEnd(24)} ${statusOf(l).padEnd(13)} ${(l.pane ?? "-").padEnd(8)} heard ${Math.round((d.now() - heard) / 60_000)}m ago  ${(l.lastReport ?? "").slice(0, 70)}`);
   }
 }
 
-export async function main(argv: readonly string[], d: Deps = defaultDeps()): Promise<number> {
+export async function main(argv: readonly string[], deps?: Deps): Promise<number> {
   const a = parse(argv);
   const [cmd, x] = a.pos;
+  if (cmd === undefined || cmd === "help" || cmd === "--help") { console.log(USAGE); return 0; }
+  const d = deps ?? (await defaultDeps());
   switch (cmd) {
     case "up":
-      await up(d, resolve(one(a, "cwd") ?? process.cwd()));
+      for (const line of await up(d, resolve(one(a, "cwd") ?? process.cwd()), Number(one(a, "interval") ?? "60"))) console.log(`UP ${line}`);
       return 0;
     case "role": {
       const role = need(x, "role") as Role;
       if (!ROLES.includes(role)) throw new Refusal(`role must be one of ${ROLES.join(", ")}`);
-      const pane = need(a.pos[2] ?? process.env["HERDR_PANE_ID"], "pane id (not inside herdr?)");
+      const pane = need(a.pos[2] ?? d.mux.ownPane(), `pane id (not inside ${d.mux.kind}?)`);
       d.store.setRole(role, pane);
       console.log(`ROLE ${role}=${pane}`);
       return 0;
     }
     case "start": {
-      const lane = await startLane(d, need(x, "lane key"), need(one(a, "brief"), "--brief"), {
-        cwd: one(a, "cwd"), workspace: one(a, "workspace"),
+      const r = await startLane(d, need(x, "lane key"), need(one(a, "brief"), "--brief"), {
+        done: need(one(a, "done"), "--done"), title: one(a, "title"), thread: one(a, "thread"), cwd: one(a, "cwd"), model: one(a, "model"),
       });
-      console.log(`STARTED ${lane.key} pane=${lane.paneId} brief=${lane.brief}`);
+      console.log(`STARTED ${r.lane.key} pane=${r.lane.pane ?? "?"} brief=${r.lane.brief}`);
+      console.log(r.startup);
       return 0;
     }
-    case "report": {
-      const st = one(a, "status");
-      if (st && st !== "working" && st !== "waiting") throw new Refusal("--status must be working or waiting");
-      await report(d, need(x, "lane key"), await textOf(a), st as "working" | "waiting" | undefined);
-      console.log(`REPORTED ${x}`);
+    case "report":
+      console.log(await report(d, need(x, "lane key"), await textOf(a), one(a, "kind")));
       return 0;
-    }
     case "ready":
-      await ready(d, need(x, "lane key"), await textOf(a), a.flags.get("evidence") ?? []);
-      console.log(`READY ${x}`);
+      console.log(await ready(d, need(x, "lane key"), await textOf(a), a.flags.get("evidence") ?? []));
       return 0;
     case "send":
       console.log(`${await send(d, need(x, "target"), await textOf(a), one(a, "from") ?? process.env["DORI_LANE"] ?? "cli")} ${x}`);
       return 0;
     case "duty": {
       const interval = Number(one(a, "interval") ?? "60") * 1000;
+      const mem = newDutyMemory(interval);
+      console.log("DUTY_LOOP_READY");
       do {
-        for (const e of await dutyTick(d)) console.log(`DUTY ${e.lane ?? e.pane} ${e.action}`);
+        for (const e of await dutyTick(d, mem)) console.log(`DUTY ${e.lane ?? e.pane ?? "-"} ${e.action}`);
         if (one(a, "once")) break;
         await Bun.sleep(interval);
       } while (true);
       return 0;
+    }
+    case "duty-watch": {
+      const loopMs = Number(one(a, "loop") ?? "1") * 60_000;
+      const staleMs = Number(one(a, "stale-min") ?? "3") * 60_000;
+      const state = { stale: false };
+      console.log("DUTY_WATCH_READY");
+      for (;;) {
+        const line = dutyWatchTick(d, staleMs, state);
+        if (line) console.log(line);
+        if (loopMs <= 0) return state.stale ? 3 : 0;
+        await Bun.sleep(loopMs);
+      }
     }
     case "review": {
       const r = await review(d, need(x, "PR"), one(a, "model"));
@@ -138,23 +149,28 @@ export async function main(argv: readonly string[], d: Deps = defaultDeps()): Pr
       console.log(await mergeGate(d, need(x, "PR"), { dryRun: one(a, "dry-run") === "true" }));
       return 0;
     case "done":
-      await done(d, need(x, "lane key"));
-      console.log(`DONE ${x}`);
+      for (const line of await done(d, need(x, "lane key"))) console.log(line);
       return 0;
     case "status":
-      status(d);
+      await status(d);
       return 0;
     default:
       console.log(USAGE);
-      return cmd === undefined || cmd === "help" || cmd === "--help" ? 0 : 64;
+      return 64;
   }
 }
 
 if (import.meta.main) {
-  try {
-    process.exit(await main(process.argv.slice(2)));
-  } catch (e) {
-    if (e instanceof Refusal) { console.error(e.message); process.exit(2); }
-    throw e;
+  const argv = process.argv.slice(2);
+  if (isSkillCommand(argv)) {
+    process.argv = [process.argv[0]!, SKILL_CLI, ...argv];
+    await import(SKILL_CLI);
+  } else {
+    try {
+      process.exit(await main(argv));
+    } catch (e) {
+      if (e instanceof Refusal) { console.error(e.message); process.exit(2); }
+      throw e;
+    }
   }
 }

@@ -1,100 +1,182 @@
 import { describe, expect, test } from "bun:test";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { done, dutyTick, mergeGate, ready, Refusal, report, review, send, startLane } from "../src/harness.ts";
+import { statusOf } from "../skills/dori-mode/scripts/src/registry.ts";
+import {
+  done, dutyTick, dutyWatchTick, mergeGate, newDutyMemory, ready, Refusal, report, review, send, startLane, up,
+} from "../src/harness.ts";
 import { World } from "./fake.ts";
 
-function setup() {
+const MIN = 60_000;
+
+function setup(patch: Parameters<World["deps"]>[0] = {}) {
   const w = new World();
-  const d = w.deps();
+  const d = w.deps({ leadPane: "w1:p1", ...patch });
   const lead = w.addPane("w1:p1", "idle");
-  d.store.setRole("lead", "w1:p1");
   const brief = join(d.store.root, "brief.md");
   writeFileSync(brief, "Fix the flaky login test.");
-  return { w, d, lead, brief };
+  const open = (key: string, extra: { done?: string; thread?: string } = {}) =>
+    startLane(d, key, brief, { done: extra.done ?? `file ${brief}`, thread: extra.thread ?? "discord:42" });
+  return { w, d, lead, brief, open };
 }
 
-describe("lanes", () => {
-  test("start opens a tab, launches omo with the brief, and tells the lead", async () => {
-    const { w, d, lead, brief } = setup();
-    const lane = await startLane(d, "fix-login", brief, { workspace: "w1" });
-    const pane = w.panes.get(lane.paneId)!;
-    expect(pane.ran[0]).toStartWith("omo 'Read your brief at ");
-    expect(await Bun.file(lane.brief).text()).toContain("dori ready fix-login --text");
-    expect(lead.received).toEqual([`[START fix-login] lane opened in ${lane.paneId}`]);
-    await expect(startLane(d, "fix-login", brief, { workspace: "w1" })).rejects.toThrow(Refusal);
+describe("one lane registry", () => {
+  test("start is Dori mode's launch: a registry lane with the lane footer and agent command, then [START] to the config's lead", async () => {
+    const { w, d, lead, brief, open } = setup();
+    const { lane } = await open("fix-login");
+    expect(await d.flow.registry.read("fix-login")).toMatchObject({ key: "fix-login", pane: lane.pane, thread: "discord:42", done: `file ${brief}` });
+    expect(await Bun.file(brief).text()).toContain("dori report fix-login --kind");
+    expect(w.panes.get(lane.pane!)!.ran[0]).toStartWith("omo --model");
+    expect(lead.received[0]).toStartWith(`[START fix-login] lane opened in ${lane.pane}`);
+    await expect(open("fix-login")).rejects.toThrow(Refusal);
   });
 
-  test("ready requires evidence, then reaches the lead; done closes only a ready lane", async () => {
-    const { w, d, lead, brief } = setup();
-    const lane = await startLane(d, "fix-login", brief, { workspace: "w1" });
-    await expect(done(d, "fix-login")).rejects.toThrow("not ready");
+  test("report records the line and the quiet clock; freshness posts it to the thread from the record, with a blank screen", async () => {
+    const { w, d, lead, open } = setup();
+    const { lane } = await open("quiet");
+    const line = await report(d, "quiet", "repro found, fixing", "milestone");
+    expect(line).toBe("[REPORT] quiet | milestone | repro found, fixing");
+    expect(lead.received.at(-1)).toBe(line);
+    expect(await d.flow.registry.read("quiet")).toMatchObject({ lastReport: line, lastReplyAt: w.clock });
+    expect(w.panes.get(lane.pane!)!.screen).toBe("");
+    w.clock += 25 * MIN;
+    const events = await dutyTick(d);
+    expect(events).toContainEqual({ lane: "quiet", action: "freshness posted" });
+    expect(w.posts()).toEqual([["discord:42", "Progress (from the lane's last report): repro found, fixing"]]);
+    await expect(report(d, "quiet", "x", "progress")).rejects.toThrow("--kind");
+  });
+
+  test("ready is a done claim with the final answer; done closes only when every Done signal reads back live", async () => {
+    const { w, d, lead, open } = setup();
+    const { lane } = await open("fix-login");
     await expect(ready(d, "fix-login", "fixed", [])).rejects.toThrow("evidence");
-    await ready(d, "fix-login", "fixed", ["https://github.com/o/r/pull/1"]);
+    expect(await ready(d, "fix-login", "fixed", ["https://github.com/o/r/pull/1"])).toStartWith("LANE_DONE_CLAIMED fix-login");
+    const claimed = (await d.flow.registry.read("fix-login"))!;
+    expect(statusOf(claimed)).toBe("done-claimed");
+    expect(claimed.claim!.evidence).toBe("fixed | evidence: https://github.com/o/r/pull/1");
     expect(lead.received.at(-1)).toBe("[READY fix-login] fixed\nevidence: https://github.com/o/r/pull/1");
-    await done(d, "fix-login");
-    expect(w.panes.has(lane.paneId)).toBe(false);
-    expect(d.store.lane("fix-login")!.status).toBe("done");
+    expect((await done(d, "fix-login")).at(-1)).toStartWith("CLOSED fix-login");
+    expect(w.panes.has(lane.pane!)).toBe(false);
+    expect(statusOf((await d.flow.registry.read("fix-login"))!)).toBe("closed");
+
+    await open("not-yet", { done: "file /nonexistent/dori-result.txt" });
+    await expect(done(d, "not-yet")).rejects.toThrow("REFUSED not-yet");
   });
 });
 
 describe("pane messaging", () => {
   test("a busy lead is never interrupted: messages queue and arrive as one batch when it goes idle", async () => {
-    const { d, lead, brief } = setup();
-    await startLane(d, "a-lane", brief, { workspace: "w1" });
+    const { d, lead, open } = setup();
+    await open("a-lane");
     lead.received.length = 0;
     lead.status = "working";
     await report(d, "a-lane", "tests red, investigating");
     expect(await send(d, "lead", "second note", "a-lane")).toBe("QUEUED");
     expect(lead.received).toEqual([]);
     lead.status = "idle";
-    const events = await dutyTick(d);
-    expect(events).toContainEqual({ pane: "w1:p1", action: "flushed" });
+    expect(await dutyTick(d)).toContainEqual({ pane: "w1:p1", action: "flushed" });
     expect(lead.received).toHaveLength(1);
     expect(lead.received[0]).toContain("2 messages arrived while you were busy");
-    expect(lead.received[0]).toContain("[REPORT a-lane] tests red, investigating");
-    expect(lead.received[0]).toContain("second note");
+    expect(lead.received[0]).toContain("[REPORT] a-lane | milestone | tests red, investigating");
   });
 
-  test("unknown targets are refused instead of guessed", async () => {
-    const { d } = setup();
+  test("unknown targets are refused instead of guessed; roles.json overrides the config's lead", async () => {
+    const { w, d } = setup();
     await expect(send(d, "nobody", "hi", "cli")).rejects.toThrow("unknown target");
+    const other = w.addPane("w1:p9", "idle");
+    d.store.setRole("lead", "w1:p9");
+    await send(d, "lead", "hi", "cli");
+    expect(other.received).toEqual(["hi"]);
   });
 });
 
 describe("duty loop", () => {
-  test("nudges an idle lane at 10 and 20 minutes, escalates at 40, and ignores WAITING lanes", async () => {
-    const { w, d, lead, brief } = setup();
-    const lane = await startLane(d, "quiet", brief, { workspace: "w1" });
-    const pane = w.panes.get(lane.paneId)!;
-    pane.status = "idle";
-    const at = async (min: number) => { w.clock = lane.createdAt + min * 60_000; return dutyTick(d); };
-    expect(await at(5)).toEqual([]);
-    expect(await at(10)).toContainEqual({ lane: "quiet", action: "nudge-1" });
-    expect(pane.received.at(-1)).toContain("idle for 10 minutes");
-    expect(await at(15)).toEqual([]);
-    expect(await at(20)).toContainEqual({ lane: "quiet", action: "nudge-2" });
-    expect(await at(40)).toContainEqual({ lane: "quiet", action: "escalated" });
-    expect(lead.received.at(-1)).toContain("[ESCALATE quiet]");
-    expect(await at(90)).toEqual([]);
+  test("freshness is the only nudger: one nudge, then one [ESCALATE] to the lead, and a vanished pane is [LOST] once", async () => {
+    const { w, d, lead, open } = setup({ nudgeAfterMin: 15 });
+    const { lane } = await open("silent");
+    const pane = w.panes.get(lane.pane!)!;
+    const mem = newDutyMemory();
+    w.clock += 16 * MIN;
+    expect(await dutyTick(d, mem)).toContainEqual({ lane: "silent", action: "freshness nudged" });
+    expect(pane.received).toHaveLength(1);
+    expect(pane.received[0]).toStartWith("[LEAD] your work thread has had no update");
+    w.clock += 16 * MIN;
+    expect(await dutyTick(d, mem)).toContainEqual({ lane: "silent", action: "escalated" });
+    expect(lead.received.at(-1)).toStartWith("[ESCALATE silent]");
+    w.clock += 16 * MIN;
+    expect((await dutyTick(d, mem)).filter((e) => e.lane === "silent")).toEqual([]);
+    expect(pane.received).toHaveLength(1);
 
-    const waiting = await startLane(d, "blocked-on-ci", brief, { workspace: "w1" });
-    w.panes.get(waiting.paneId)!.status = "idle";
-    await report(d, "blocked-on-ci", "WAITING: CI", "waiting");
-    w.clock += 60 * 60_000;
-    expect((await dutyTick(d)).filter((e) => e.lane === "blocked-on-ci")).toEqual([]);
+    w.panes.delete(lane.pane!);
+    expect(await dutyTick(d, mem)).toContainEqual({ lane: "silent", action: "lost" });
+    expect(lead.received.at(-1)).toStartWith("[LOST silent]");
+    expect((await dutyTick(d, mem)).filter((e) => e.action === "lost")).toEqual([]);
   });
 
-  test("a working lane counts as activity; a vanished pane is reported LOST", async () => {
-    const { w, d, lead, brief } = setup();
-    const lane = await startLane(d, "busy", brief, { workspace: "w1" });
-    w.panes.get(lane.paneId)!.status = "working";
-    w.clock += 30 * 60_000;
-    expect(await dutyTick(d)).toEqual([]);
-    expect(d.store.lane("busy")!.lastActivityAt).toBe(w.clock);
-    w.panes.delete(lane.paneId);
-    expect(await dutyTick(d)).toContainEqual({ lane: "busy", action: "lost" });
-    expect(lead.received.at(-1)).toContain("[LOST busy]");
+  test("a dead lane pane goes to the duty session; the duty session and loop panes are never swept", async () => {
+    const { w, d, open } = setup();
+    const duty = w.addPane("w1:p50", "idle");
+    w.addPane("w1:p51", "shell");
+    d.store.setRole("duty", "w1:p50");
+    d.store.setRole("duty-loop", "w1:p51");
+    const { lane } = await open("crashed");
+    const pane = w.panes.get(lane.pane!)!;
+    pane.status = "shell";
+    pane.screen = "omo has stopped";
+    const mem = newDutyMemory();
+    const all = [...(await dutyTick(d, mem)), ...(await dutyTick(d, mem)), ...(await dutyTick(d, mem))];
+    expect(all).toContainEqual({ pane: lane.pane, action: "dead_pane" });
+    expect(all.filter((e) => e.pane === "w1:p50" || e.pane === "w1:p51")).toEqual([]);
+    expect(duty.received.some((m) => m.startsWith(`[DEAD_PANE ${lane.pane}]`))).toBe(true);
+  });
+
+  test("every pass writes a heartbeat; duty-watch says DUTY_STALE once when it stops and DUTY_OK when it is back", async () => {
+    const { w, d } = setup();
+    const state = { stale: false };
+    expect(dutyWatchTick(d, 3 * MIN, state)).toBe("DUTY_STALE no heartbeat yet; run: dori up");
+    await dutyTick(d, newDutyMemory(60_000));
+    expect(d.store.heartbeat()).toMatchObject({ at: w.clock, intervalMs: 60_000 });
+    expect(dutyWatchTick(d, 3 * MIN, state)).toBe("DUTY_OK beat 0 s ago");
+    w.clock += 4 * MIN;
+    expect(dutyWatchTick(d, 3 * MIN, state)).toStartWith("DUTY_STALE last beat 4 min ago");
+    expect(dutyWatchTick(d, 3 * MIN, state)).toBeNull();
+  });
+
+  test("a failing step does not stop the pass or the heartbeat", async () => {
+    const { w, d } = setup();
+    const broken = { ...d, flow: { ...d.flow, registry: { ...d.flow.registry, open: async () => { throw new Error("disk gone"); } } as unknown as typeof d.flow.registry } };
+    const events = await dutyTick(broken);
+    expect(events.some((e) => e.action.startsWith("error lanes: disk gone"))).toBe(true);
+    expect(d.store.heartbeat()?.at).toBe(w.clock);
+  });
+});
+
+describe("dori up", () => {
+  test("never starts a second lead; starts duty and loop once; revives only what died", async () => {
+    const { w, d, lead } = setup();
+    const before = w.panes.size;
+    const first = await up(d, "/repo");
+    expect(first[0]).toBe("LEAD w1:p1 idle");
+    const dutyPane = d.store.roles().duty!;
+    const loopPane = d.store.roles()["duty-loop"]!;
+    expect(w.panes.get(dutyPane)!.ran[0]).toMatch(/^omo --append-system-prompt .*duty\.md'$/);
+    expect(w.panes.get(loopPane)!.ran[0]).toBe("dori duty --interval 60");
+    expect(w.panes.size).toBe(before + 2);
+
+    expect(await up(d, "/repo")).toEqual(["LEAD w1:p1 idle", `DUTY ${dutyPane} idle`, "LOOP alive, beat 0 s ago"]);
+    expect(w.panes.size).toBe(before + 2);
+
+    lead.status = "idle";
+    w.panes.delete("w1:p1");
+    w.panes.get(dutyPane)!.status = "shell";
+    w.clock += 4 * MIN;
+    const revived = await up(d, "/repo");
+    expect(revived[0]).toContain("not starting another lead");
+    expect(revived[1]).toBe(`DUTY restarted in ${dutyPane}`);
+    expect(revived[2]).toStartWith(`LOOP started `);
+    expect(revived[2]).toContain(`(replaced ${loopPane})`);
+    expect(w.panes.has(loopPane)).toBe(false);
+    expect(w.calls.filter((c) => c.argv[0] === "workspace")).toEqual([]);
   });
 });
 

@@ -17,7 +17,10 @@ export type GuardThresholds = {
   readonly panesMax: number;
 };
 
+export type Mux = "herdr" | "hc";
+
 export type DoriConfig = {
+  readonly mux: Mux;
   readonly stateDir: string;
   readonly laneWorkspace: string;
   readonly workspaces: readonly string[];
@@ -39,6 +42,7 @@ export type DoriConfig = {
 };
 
 export const defaultConfig = (home = homedir()): DoriConfig => ({
+  mux: "herdr",
   stateDir: join(home, ".dori", "state"),
   laneWorkspace: "",
   workspaces: [],
@@ -68,8 +72,11 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
   const file = Bun.file(path);
   const raw = (await file.exists()) ? ((await file.json()) as Partial<DoriConfig>) : {};
   const merged: DoriConfig = { ...base, ...raw, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks } };
+  const mux = process.env.DORI_MUX ?? merged.mux;
+  if (mux !== "herdr" && mux !== "hc") throw new Error(`mux must be "herdr" or "hc", got "${mux}"`);
   return {
     ...merged,
+    mux,
     stateDir: expandHome(process.env.DORI_STATE_DIR ?? merged.stateDir, home),
     defaultCwd: expandHome(merged.defaultCwd, home),
     sessionsDir: expandHome(merged.sessionsDir, home),

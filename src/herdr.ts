@@ -1,6 +1,8 @@
 // Thin, typed wrapper over the herdr CLI. Every call goes through one injectable `Exec`,
 // so tests can replace herdr with a recorder and the e2e test can point at an isolated session.
 
+import type { Mux } from "./mux.ts";
+
 export type ExecResult = { readonly code: number; readonly stdout: string; readonly stderr: string };
 export type Exec = (cmd: string, argv: readonly string[]) => Promise<ExecResult>;
 
@@ -25,7 +27,9 @@ export type AgentStatus = "idle" | "working" | "blocked" | "done" | "unknown" | 
 
 export type PaneRef = { readonly paneId: string; readonly tabId: string; readonly workspaceId: string };
 
-export class Herdr {
+export class Herdr implements Mux {
+  readonly kind = "herdr" as const;
+
   constructor(
     private readonly exec: Exec = spawnExec,
     private readonly session: string | undefined = process.env["DORI_HERDR_SESSION"],
@@ -101,6 +105,22 @@ export class Herdr {
 
   async close(paneId: string): Promise<void> {
     await this.call(["pane", "close", paneId]);
+  }
+
+  ownPane(): string | undefined {
+    return process.env["HERDR_PANE_ID"];
+  }
+
+  ownWorkspace(): string | undefined {
+    return process.env["HERDR_WORKSPACE_ID"];
+  }
+
+  isPaneId(target: string): boolean {
+    return /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/.test(target);
+  }
+
+  canReceive(status: AgentStatus): boolean {
+    return status === "idle" || status === "done" || status === "shell";
   }
 }
 

@@ -9,7 +9,8 @@ const herdrBin = Bun.which("herdr");
 const session = `dori-e2e-${process.pid}`;
 const home = mkdtempSync(join(tmpdir(), "dori-e2e-"));
 const cli = resolve(import.meta.dir, "../src/cli.ts");
-const env = { ...process.env, DORI_HOME: home, DORI_HERDR_SESSION: session };
+const config = join(home, "config.json");
+const env = { ...process.env, DORI_HOME: home, DORI_HERDR_SESSION: session, DORI_MUX: "herdr", DORI_CONFIG: config };
 let server: ReturnType<typeof Bun.spawn> | undefined;
 
 const herdr = async (...argv: string[]) => {
@@ -46,7 +47,7 @@ afterAll(async () => {
   await spawnExec("herdr", ["session", "delete", session]);
 });
 
-test.skipIf(!herdrBin)("a lane started in real herdr reports and finishes, and the lead pane receives both", async () => {
+test.skipIf(!herdrBin)("a lane started in real herdr reports and claims done, and the lead pane receives both", async () => {
   const ws = await herdr("workspace", "create", "--label", "e2e", "--cwd", home, "--no-focus");
   const lead = ws.root_pane.pane_id as string;
   await herdr("pane", "run", lead, "cat");
@@ -55,20 +56,20 @@ test.skipIf(!herdrBin)("a lane started in real herdr reports and finishes, and t
   writeFileSync(brief, "E2E-BRIEF say hello\n");
 
   const fake = resolve(import.meta.dir, "fixtures/fake-agent.sh");
-  const doriCmd = `DORI_HOME=${shq(home)} DORI_HERDR_SESSION=${session} bun ${shq(cli)}`;
-  const started = Bun.spawn(["bun", cli, "start", "e2e-lane", "--brief", brief, "--workspace", ws.workspace.workspace_id], {
-    env: { ...env, DORI_AGENT_CMD: `DORI_E2E_CMD=${shq(doriCmd)} ${shq(fake)}`, DORI_CMD: doriCmd },
-    stdout: "pipe", stderr: "pipe",
-  });
-  expect(await started.exited).toBe(0);
+  const doriCmd = `DORI_HOME=${shq(home)} DORI_HERDR_SESSION=${session} DORI_MUX=herdr DORI_CONFIG=${shq(config)} bun ${shq(cli)}`;
+  writeFileSync(config, JSON.stringify({
+    mux: "herdr", stateDir: join(home, "state"), defaultCwd: home, laneWorkspace: ws.workspace.workspace_id,
+    agentCommand: ["env", `DORI_E2E_CMD=${doriCmd}`, fake, "{prompt}"],
+  }));
+  expect(await dori("start", "e2e-lane", "--brief", brief, "--done", `file ${brief}`)).toContain("STARTED e2e-lane");
 
   const leadText = await until("READY in the lead pane", async () => {
     const r = await spawnExec("herdr", ["--session", session, "pane", "read", lead, "--lines", "60", "--source", "recent"]);
     return r.stdout.includes("[READY e2e-lane]") ? r.stdout : undefined;
   });
   expect(leadText).toContain("[START e2e-lane]");
-  expect(leadText).toContain("[REPORT e2e-lane] read brief: E2E-BRIEF say hello");
+  expect(leadText).toContain("[REPORT] e2e-lane | milestone | read brief: E2E-BRIEF say hello");
   expect(leadText).toContain("[READY e2e-lane] e2e lane finished");
-  expect(await dori("status")).toMatch(/e2e-lane\s+ready/);
-  expect(await dori("done", "e2e-lane")).toContain("DONE e2e-lane");
-}, 60_000);
+  expect(await dori("status")).toMatch(/e2e-lane\s+done-claimed/);
+  expect(await dori("done", "e2e-lane")).toContain("CLOSED e2e-lane");
+}, 90_000);

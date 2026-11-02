@@ -51,11 +51,14 @@ Greet the owner through the bot before doing anything else.
 ## 4. Scripts
 
 ```sh
-cd skills/dori-mode/scripts && bun install && bun link    # puts `dori` on PATH
-mkdir -p ~/.dori && cp ../references/config.example.json ~/.dori/config.json
+cd skills/dori-mode/scripts && bun install && bun link    # puts `dori-mode` on PATH
+cd ../../.. && bun install && bun link                     # puts `dori` on PATH (runs every command below)
+mkdir -p ~/.dori && cp skills/dori-mode/references/config.example.json ~/.dori/config.json
 ```
 
 Then edit `~/.dori/config.json`: at least `leadPane` (your own herdr pane, from `herdr pane current`), `laneWorkspace`, `defaultCwd`, and the two hooks if you want lane threads updated automatically. `references/scripts.md` explains every field.
+
+On herdr-core, set `"mux": "hc"`: `leadPane` is your hc terminal (`echo $HC_TERMINAL_ID`), and `laneWorkspace`/`workspaces` are Herdr app space ids (the `herdr.space` label in `hc get <terminal>`). See `sessions.md` for the hc commands.
 
 ## 5. Monitors
 
@@ -70,6 +73,8 @@ Arm these as persistent monitors in your own session:
 | freshness | `dori freshness --loop 5` | `^(NUDGED\|POSTED\|NO-REPORT\|PENDING-REPORT\|STALE-REPORT)` |
 | Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |
 | presence (optional) | `dori presence slack` or `dori presence discord` | `^PRESENCE_READY` |
+
+With the harness's duty session (`dori up`, see the repository README), the duty loop runs the dead-pane and freshness sweeps itself. Then leave those two monitors out, so no lane is nudged twice, and arm `dori duty-watch --loop 1` (filter `^DUTY_`) instead: it says `DUTY_STALE` when the loop stops, and `dori up` brings it back.
 
 ## 6. First look around
 
