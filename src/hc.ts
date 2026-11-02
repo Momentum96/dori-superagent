@@ -117,4 +117,9 @@ export class Hc implements Mux {
   isPaneId(target: string): boolean {
     return ADDRESS.test(target);
   }
+
+  // hc send pastes and presses Enter: into a plain shell that runs the text as a command, so only agents get mail.
+  canReceive(status: AgentStatus): boolean {
+    return status === "idle" || status === "done";
+  }
 }

@@ -118,6 +118,10 @@ export class Herdr implements Mux {
   isPaneId(target: string): boolean {
     return /^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/.test(target);
   }
+
+  canReceive(status: AgentStatus): boolean {
+    return status === "idle" || status === "done" || status === "shell";
+  }
 }
 
 function toPaneRef(v: unknown): PaneRef {

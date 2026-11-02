@@ -2,14 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { defaultConfig, loadConfig } from "../skills/dori-mode/scripts/src/config.ts";
+import { hcRunner } from "../skills/dori-mode/scripts/src/hc-runner.ts";
+import { Registry } from "../skills/dori-mode/scripts/src/registry.ts";
 import { isSkillCommand } from "../src/cli.ts";
-import { done, dutyTick, ready, send, startLane, type Deps } from "../src/harness.ts";
+import { done, dutyTick, send, startLane, up, type Deps } from "../src/harness.ts";
 import { Hc } from "../src/hc.ts";
 import type { Exec } from "../src/herdr.ts";
-import { muxSettings } from "../src/mux.ts";
 import { Store } from "../src/store.ts";
 
-type Term = { state: "live" | "finished"; status: { app: string; state: string } | null; labels: Record<string, string>; argv: string[]; received: string[] };
+type Term = { state: "live" | "finished"; status: { app: string; state: string } | null; labels: Record<string, string>; received: string[] };
 
 class HcWorld {
   terms = new Map<string, Term>();
@@ -17,7 +19,7 @@ class HcWorld {
   next = 10;
 
   add(address: string, state: string | null): Term {
-    const t: Term = { state: "live", status: state ? { app: "omo", state } : null, labels: {}, argv: [], received: [] };
+    const t: Term = { state: "live", status: state ? { app: "omo", state } : null, labels: {}, received: [] };
     this.terms.set(address, t);
     return t;
   }
@@ -25,19 +27,23 @@ class HcWorld {
   exec: Exec = async (cmd, argv) => {
     this.calls.push([cmd, ...argv]);
     const ok = (out: unknown = "") => ({ code: 0, stdout: typeof out === "string" ? out : JSON.stringify(out), stderr: "" });
+    if (cmd !== "hc") return { code: 1, stdout: "", stderr: `no ${cmd} here` };
     const [verb, address = ""] = argv;
     if (verb === "run") {
       const t = this.add(`t${++this.next}`, null);
       for (let i = 0; i < argv.length; i++) if (argv[i] === "--label") { const [k, v] = argv[i + 1]!.split("="); t.labels[k!] = v!; }
-      const envAt = argv.indexOf("env");
-      t.argv = envAt >= 0 ? argv.slice(envAt) : [];
       return ok({ address: `t${this.next}`, state: "live" });
     }
+    if (verb === "ls") return ok({ terminals: [...this.terms].filter(([, t]) => t.state === "live").map(([a, t]) => ({ address: a, ...(t.status ? { agent: t.status.app, status: t.status.state } : {}) })) });
     const t = this.terms.get(address);
     if (!t) return { code: 3, stdout: "", stderr: JSON.stringify({ error: { kind: "not_found", message: `no terminal ${address}` } }) };
-    if (verb === "get") return ok({ address, state: t.state, status: t.status, labels: t.labels });
-    if (verb === "send") { t.received.push(argv[2]!); return ok({ sent: true }); }
-    if (verb === "read") return ok(t.received.join("\n"));
+    if (verb === "get") return ok({ address, pid: 1, state: t.state, status: t.status, labels: t.labels });
+    if (verb === "send") {
+      t.received.push(argv[2]!);
+      if (!t.status && /^omo\b/.test(argv[2]!)) t.status = { app: "omo", state: "idle" };
+      return ok({ started: true });
+    }
+    if (verb === "read") return ok("");
     if (verb === "kill") { t.state = "finished"; return ok(); }
     if (verb === "wait") return ok();
     if (verb === "rm") { this.terms.delete(address); return ok(); }
@@ -45,9 +51,29 @@ class HcWorld {
   };
 
   deps(space?: string): Deps {
-    return { store: new Store(mkdtempSync(join(tmpdir(), "dori-hc-test-"))), mux: new Hc(this.exec, space, "/bin/zsh"), exec: this.exec, now: () => 1_000_000, agentCmd: "omo", doriCmd: "dori" };
+    const stateDir = mkdtempSync(join(tmpdir(), "dori-hc-state-"));
+    const run = hcRunner(async (argv) => {
+      const r = await this.exec(argv[0]!, argv.slice(1));
+      return { code: r.code, out: r.stdout.trim(), err: r.stderr.trim() };
+    });
+    const config = { ...defaultConfig("/home/test"), mux: "hc" as const, stateDir, defaultCwd: stateDir, leadPane: "t3", laneWorkspace: space ?? "" };
+    return {
+      store: new Store(mkdtempSync(join(tmpdir(), "dori-hc-test-"))),
+      mux: new Hc(this.exec, space, "/bin/zsh"),
+      exec: this.exec,
+      now: () => 1_000_000,
+      agentCmd: "omo",
+      doriCmd: "dori",
+      flow: { run, clock: { now: () => 1_000_000, sleep: async () => {} }, registry: new Registry(stateDir), config, exists: () => true },
+    };
   }
 }
+
+const briefIn = (d: Deps) => {
+  const brief = join(d.store.root, "brief.md");
+  writeFileSync(brief, "Fix the flaky login test.");
+  return brief;
+};
 
 describe("hc multiplexer", () => {
   test("status maps hc's reported agent state; no status is a shell; finished or missing is gone", async () => {
@@ -64,53 +90,55 @@ describe("hc multiplexer", () => {
     expect(await hc.status("t99")).toBe("gone");
   });
 
-  test("a lane opens as a named terminal in the configured space, with env through `env`, and reaches the lead by hc send", async () => {
+  test("a lane opens through Dori mode's launch as a named terminal in the space, and [START] reaches the config's lead", async () => {
     const w = new HcWorld();
     const d = w.deps("sp1");
     const lead = w.add("t3", "idle");
-    d.store.setRole("lead", "t3");
-    const brief = join(d.store.root, "brief.md");
-    writeFileSync(brief, "Fix the flaky login test.");
-    const lane = await startLane(d, "fix-login", brief, { cwd: "/repo" });
-    expect(lane.paneId).toBe("t11");
-    expect(w.calls[0]).toEqual([
-      "hc", "run", "--bg", "--json", "--outlive-parent", "--no-notify", "--cwd", "/repo", "--name", "fix-login",
-      "--label", "herdr.space=sp1", "--label", "dori.tab=fix-login",
-      "env", "DORI_LANE=fix-login", `DORI_HOME=${d.store.root}`, "DORI_MUX=hc", "/bin/zsh", "-l",
+    const brief = briefIn(d);
+    const { lane } = await startLane(d, "fix-login", brief, { done: `file ${brief}`, cwd: "/repo" });
+    expect(lane.pane).toBe("t11");
+    expect(w.calls.find((c) => c[1] === "run")).toEqual([
+      "hc", "run", "--bg", "--json", "--outlive-parent", "--no-notify", "--name", "fix-login", "--cwd", "/repo",
+      "--label", "herdr.space=sp1", "--label", "dori.lane=fix-login",
     ]);
-    expect(w.terms.get("t11")!.received[0]).toStartWith("omo 'Read your brief at ");
-    expect(lead.received).toEqual(["[START fix-login] lane opened in t11"]);
+    expect(w.terms.get("t11")!.received[0]).toStartWith("omo --model");
+    expect(lead.received[0]).toStartWith("[START fix-login] lane opened in t11: STARTUP_OK");
   });
 
-  test("a busy lead gets queued messages once hc reports it idle; done kills and removes the lane terminal", async () => {
+  test("a terminal that runs no agent never gets mail: it stays queued and nothing is typed until an agent is idle there", async () => {
     const w = new HcWorld();
     const d = w.deps();
-    const lead = w.add("t3", "working");
-    d.store.setRole("lead", "t3");
-    const brief = join(d.store.root, "brief.md");
-    writeFileSync(brief, "x");
-    const lane = await startLane(d, "a-lane", brief, { cwd: "/repo" });
-    expect(await send(d, "lead", "note", "a-lane")).toBe("QUEUED");
-    expect(lead.received).toEqual([]);
-    lead.status = { app: "omo", state: "idle" };
-    expect(await dutyTick(d)).toContainEqual({ pane: "t3", action: "flushed" });
-    expect(lead.received[0]).toContain("2 messages arrived while you were busy");
-    await ready(d, "a-lane", "fixed", ["https://example.invalid/pr/1"]);
-    await done(d, "a-lane");
-    expect(w.terms.has(lane.paneId)).toBe(false);
-    expect(w.calls.filter((c) => c[2] === lane.paneId && ["kill", "rm"].includes(c[1]!)).map((c) => c[1])).toEqual(["kill", "rm"]);
+    const shell = w.add("t5", null);
+    expect(await send(d, "t5", "rm -rf ~/work", "cli")).toBe("QUEUED");
+    expect(await dutyTick(d)).not.toContainEqual({ pane: "t5", action: "flushed" });
+    expect(shell.received).toEqual([]);
+    expect(w.calls.some((c) => c[1] === "send" && c[2] === "t5")).toBe(false);
+    shell.status = { app: "omo", state: "idle" };
+    expect(await dutyTick(d)).toContainEqual({ pane: "t5", action: "flushed" });
+    expect(shell.received).toEqual(["rm -rf ~/work"]);
   });
 
-  test("without a configured space a lane opens as one top-level terminal, never an extra workspace shell", async () => {
+  test("done closes a lane whose Done signal is live: the terminal is killed, waited and removed", async () => {
     const w = new HcWorld();
     const d = w.deps();
-    const brief = join(d.store.root, "brief.md");
-    writeFileSync(brief, "x");
-    await startLane(d, "solo", brief, { cwd: "/repo" });
+    w.add("t3", "idle");
+    const brief = briefIn(d);
+    const { lane } = await startLane(d, "a-lane", brief, { done: `file ${brief}`, cwd: "/repo" });
+    expect((await done(d, "a-lane")).at(-1)).toStartWith("CLOSED a-lane");
+    expect(w.terms.has(lane.pane!)).toBe(false);
+    expect(w.calls.filter((c) => c[2] === lane.pane && ["kill", "wait", "rm"].includes(c[1]!)).map((c) => c[1])).toEqual(["kill", "wait", "rm"]);
+  });
+
+  test("dori up without a space opens exactly the duty and loop terminals, never a workspace shell or a second lead", async () => {
+    const w = new HcWorld();
+    const d = w.deps();
+    w.add("t3", "idle");
+    const lines = await up(d, "/repo");
+    expect(lines[0]).toBe("LEAD t3 idle");
     const runs = w.calls.filter((c) => c[1] === "run");
-    expect(runs).toHaveLength(1);
-    expect(runs[0]!.some((a) => a.startsWith("herdr.space="))).toBe(false);
-    expect(runs[0]).toContain("dori.tab=solo");
+    expect(runs).toHaveLength(2);
+    expect(runs.map((r) => r[r.indexOf("--name") + 1])).toEqual(["duty", "duty-loop"]);
+    expect(runs.flat().some((a) => a.startsWith("herdr.space=") || a.startsWith("dori.workspace="))).toBe(false);
   });
 
   test("hc addresses are pane ids for dori send; herdr ids and lane keys are not", () => {
@@ -121,18 +149,21 @@ describe("hc multiplexer", () => {
 });
 
 describe("mux selection", () => {
-  const cfg = (body: unknown) => {
-    const p = join(mkdtempSync(join(tmpdir(), "dori-cfg-")), "config.json");
-    writeFileSync(p, JSON.stringify(body));
-    return p;
-  };
-
-  test("DORI_MUX wins over the config file; the config's mux and laneWorkspace apply otherwise; default is herdr", () => {
-    const path = cfg({ mux: "hc", laneWorkspace: "sp9" });
-    expect(muxSettings({ DORI_CONFIG: path })).toEqual({ kind: "hc", space: "sp9" });
-    expect(muxSettings({ DORI_CONFIG: path, DORI_MUX: "herdr" })).toEqual({ kind: "herdr", space: "sp9" });
-    expect(muxSettings({ DORI_CONFIG: join(tmpdir(), "no-such-dori-config.json") })).toEqual({ kind: "herdr" });
-    expect(() => muxSettings({ DORI_CONFIG: path, DORI_MUX: "tmux" })).toThrow("mux must be");
+  test("the Dori mode config picks the multiplexer; DORI_MUX overrides it; anything else is refused", async () => {
+    const path = join(mkdtempSync(join(tmpdir(), "dori-cfg-")), "config.json");
+    writeFileSync(path, JSON.stringify({ mux: "hc" }));
+    const saved = process.env["DORI_MUX"];
+    try {
+      delete process.env["DORI_MUX"];
+      expect((await loadConfig(path)).mux).toBe("hc");
+      process.env["DORI_MUX"] = "herdr";
+      expect((await loadConfig(path)).mux).toBe("herdr");
+      process.env["DORI_MUX"] = "tmux";
+      await expect(loadConfig(path)).rejects.toThrow("mux must be");
+    } finally {
+      if (saved === undefined) delete process.env["DORI_MUX"];
+      else process.env["DORI_MUX"] = saved;
+    }
   });
 });
 
@@ -141,7 +172,7 @@ describe("one dori command", () => {
     for (const argv of [["watch"], ["dead-panes", "--loop", "3"], ["guard"], ["freshness"], ["can-launch"], ["launch", "k"], ["sync"], ["claim-done", "k"], ["object-done", "k"], ["close", "k"], ["send", "discord", "--to", "1"]]) {
       expect(isSkillCommand(argv)).toBe(true);
     }
-    for (const argv of [["send", "lead", "--text", "hi"], ["send", "t3"], ["start", "k"], ["done", "k"], ["status"], ["up"], []]) {
+    for (const argv of [["send", "lead", "--text", "hi"], ["send", "t3"], ["start", "k"], ["report", "k"], ["ready", "k"], ["done", "k"], ["status"], ["up"], ["duty"], ["duty-watch"], []]) {
       expect(isSkillCommand(argv)).toBe(false);
     }
   });
@@ -159,12 +190,12 @@ describe("one dori command", () => {
       const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
       return { out, err, code };
     };
-    const claim = await runCli("claim-done", "--evidence", "x");
-    expect(claim).toMatchObject({ code: 1, err: "no open lane is registered for this pane\n" });
-    const sendDiscord = await runCli("send", "discord", "--to", "1", "--text", "hi");
-    expect(sendDiscord.err).toContain("DORI_DISCORD_TOKEN is not set");
+    expect(await runCli("claim-done", "--evidence", "x")).toMatchObject({ code: 1, err: "no open lane is registered for this pane\n" });
+    expect((await runCli("send", "discord", "--to", "1", "--text", "hi")).err).toContain("DORI_DISCORD_TOKEN is not set");
     const sendLead = await runCli("send", "lead", "--text", "hi");
     expect(sendLead).toMatchObject({ code: 2 });
-    expect(sendLead.err).toContain("no lead pane registered");
+    expect(sendLead.err).toContain("no lead pane");
+    const watch = await runCli("duty-watch", "--loop", "0");
+    expect(watch).toMatchObject({ code: 3, out: "DUTY_WATCH_READY\nDUTY_STALE no heartbeat yet; run: dori up\n" });
   });
 });

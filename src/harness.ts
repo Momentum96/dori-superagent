@@ -1,13 +1,26 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { loadConfig } from "../skills/dori-mode/scripts/src/config.ts";
+import { deadPaneTick, newDeadPaneState, type DeadPaneState } from "../skills/dori-mode/scripts/src/dead-panes.ts";
+import { claimDone, closeLane, type FlowDeps } from "../skills/dori-mode/scripts/src/done-flow.ts";
+import { freshnessTick } from "../skills/dori-mode/scripts/src/freshness.ts";
+import { hcRunner } from "../skills/dori-mode/scripts/src/hc-runner.ts";
+import { launchLane, LaunchError } from "../skills/dori-mode/scripts/src/launch.ts";
+import { type Lane, type LaneStatus, Registry, statusOf } from "../skills/dori-mode/scripts/src/registry.ts";
+import { realClock, run as spawnRun, type Runner } from "../skills/dori-mode/scripts/src/run.ts";
 import { shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
 import { muxFor, type Mux } from "./mux.ts";
-import { Store, type Lane, type Role } from "./store.ts";
+import { Store, type Role } from "./store.ts";
 
-export const NUDGE_MINUTES = [10, 20, 40] as const;
-const KEY_RE = /^[a-z][a-z0-9-]{1,40}$/;
+// Lanes live in Dori mode's registry (<stateDir>/lanes): `dori start` is `dori launch` plus a [START] to the lead,
+// `dori ready` is a done claim, `dori done` is a close. So sync, freshness, dead-panes, the thread hooks and the
+// claim-done/watch flow see every lane, whichever command opened it.
+
 const PROMPTS = join(import.meta.dir, "..", "prompts");
 const CLI = resolve(import.meta.dir, "cli.ts");
+export const REPORT_KINDS = ["milestone", "blocker", "question", "done"] as const;
+export type ReportKind = (typeof REPORT_KINDS)[number];
+const LOST_FROM: ReadonlySet<LaneStatus> = new Set(["working", "not-done", "paused"]);
 
 export type Deps = {
   readonly store: Store;
@@ -16,18 +29,26 @@ export type Deps = {
   readonly now: () => number;
   readonly agentCmd: string;
   readonly doriCmd: string;
+  /** Dori mode's side: its config, lane registry, pane runner and clock. */
+  readonly flow: FlowDeps;
 };
 
-export const defaultDeps = (): Deps => {
+export const defaultDeps = async (): Promise<Deps> => {
+  const config = await loadConfig();
   const store = new Store();
-  const mux = muxFor();
+  const space = process.env["DORI_HC_SPACE"] ?? (config.laneWorkspace || undefined);
+  const mux = muxFor(space ? { kind: config.mux, space } : { kind: config.mux });
+  const cfg = process.env["DORI_CONFIG"] ? `DORI_CONFIG=${shq(process.env["DORI_CONFIG"])} ` : "";
+  const session = process.env["DORI_HERDR_SESSION"];
+  const herdrRun: Runner = session ? (argv, o) => spawnRun(argv[0] === "herdr" ? ["herdr", "--session", session, ...argv.slice(1)] : argv, o) : spawnRun;
   return {
     store,
     mux,
     exec: spawnExec,
     now: Date.now,
     agentCmd: process.env["DORI_AGENT_CMD"] ?? "omo",
-    doriCmd: process.env["DORI_CMD"] ?? `DORI_HOME=${shq(store.root)} DORI_MUX=${mux.kind} bun ${shq(CLI)}`,
+    doriCmd: process.env["DORI_CMD"] ?? `DORI_HOME=${shq(store.root)} DORI_MUX=${mux.kind} ${cfg}bun ${shq(CLI)}`,
+    flow: { run: config.mux === "hc" ? hcRunner(spawnRun) : herdrRun, clock: realClock, registry: new Registry(config.stateDir), config },
   };
 };
 
@@ -36,26 +57,39 @@ export class Refusal extends Error {}
 const prompt = (name: string, vars: Record<string, string>): string =>
   readFileSync(join(PROMPTS, name), "utf8").replace(/\{\{(\w+)\}\}/g, (_, k: string) => vars[k] ?? `{{${k}}}`);
 
-// ---------- pane messaging ----------
+export function renderPrompt(d: Deps, name: string): string {
+  const dir = join(d.store.root, "prompts");
+  mkdirSync(dir, { recursive: true });
+  const out = join(dir, name);
+  writeFileSync(out, prompt(name, { dori: d.doriCmd }));
+  return out;
+}
 
-export function resolveTarget(d: Deps, target: string): string {
+// ---------- roles and pane messaging ----------
+
+/** The lead is the Dori-mode lead (config `leadPane`) unless `dori role lead` registered another pane. */
+export const leadPane = (d: Deps): string | undefined => d.store.roles().lead ?? (d.flow.config.leadPane || undefined);
+
+export async function resolveTarget(d: Deps, target: string): Promise<string> {
   if (d.mux.isPaneId(target)) return target;
-  const roles = d.store.roles();
-  if (target === "lead" || target === "duty") {
-    const pane = roles[target];
-    if (!pane) throw new Refusal(`no ${target} pane registered (dori role ${target} <pane>)`);
+  if (target === "lead") {
+    const pane = leadPane(d);
+    if (!pane) throw new Refusal("no lead pane: set leadPane in the config, or run dori role lead <pane>");
     return pane;
   }
-  const lane = d.store.lane(target);
-  if (lane && lane.status !== "done") return lane.paneId;
+  if (target === "duty") {
+    const pane = d.store.roles().duty;
+    if (!pane) throw new Refusal("no duty pane registered (dori up)");
+    return pane;
+  }
+  const lane = await d.flow.registry.read(target);
+  if (lane && statusOf(lane) !== "closed" && lane.pane) return lane.pane;
   throw new Refusal(`unknown target ${target}: not a pane id, role or open lane`);
 }
 
-const READY_TO_READ: readonly AgentStatus[] = ["idle", "done", "shell"];
-
 /** Delivers now when the pane can read; otherwise queues it for the duty loop (busy agents are never interrupted). */
 export async function send(d: Deps, target: string, text: string, from: string): Promise<"DELIVERED" | "QUEUED"> {
-  const paneId = resolveTarget(d, target);
+  const paneId = await resolveTarget(d, target);
   d.store.enqueue(paneId, { at: d.now(), from, text });
   return (await flushInbox(d, paneId)) ? "DELIVERED" : "QUEUED";
 }
@@ -65,7 +99,7 @@ export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
   if (queued.length === 0) return true;
   const status = await d.mux.status(paneId);
   if (status === "gone") throw new Refusal(`pane ${paneId} is gone; ${queued.length} message(s) kept in its inbox`);
-  if (!READY_TO_READ.includes(status)) return false;
+  if (!d.mux.canReceive(status)) return false;
   const body =
     queued.length === 1
       ? queued[0]!.text
@@ -76,140 +110,205 @@ export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
   return true;
 }
 
-async function tellLead(d: Deps, text: string, from: string): Promise<void> {
-  if (!d.store.roles().lead) {
-    process.stderr.write(`dori: no lead pane registered; message kept only in the lane log\n`);
-    return;
+async function tell(d: Deps, target: "lead" | "duty", text: string, from: string): Promise<void> {
+  try {
+    await send(d, target, text, from);
+  } catch (e) {
+    if (!(e instanceof Refusal)) throw e;
+    process.stderr.write(`dori: ${e.message}; message kept: ${text.slice(0, 120)}\n`);
   }
-  await send(d, "lead", text, from);
 }
 
-// ---------- lanes ----------
+const tellLead = (d: Deps, text: string, from: string) => tell(d, "lead", text, from);
+const tellDuty = (d: Deps, text: string, from: string) => (d.store.roles().duty ? tell(d, "duty", text, from) : tellLead(d, text, from));
 
-export async function startLane(
-  d: Deps,
-  key: string,
-  briefFile: string,
-  opts: { cwd?: string; workspace?: string } = {},
-): Promise<Lane> {
-  if (!KEY_RE.test(key)) throw new Refusal(`lane key must match ${KEY_RE}`);
-  const existing = d.store.lane(key);
-  if (existing && existing.status !== "done") throw new Refusal(`lane ${key} is already open in ${existing.paneId}`);
-  const cwd = resolve(opts.cwd ?? process.cwd());
-  const briefPath = d.store.briefPath(key);
-  const footer = prompt("lane-footer.md", { key, dori: d.doriCmd });
-  await Bun.write(briefPath, `${readFileSync(briefFile, "utf8").trimEnd()}\n\n${footer}`);
+// ---------- lanes (Dori mode's registry) ----------
 
-  const workspace = opts.workspace ?? d.mux.ownWorkspace();
-  const env = { DORI_LANE: key, DORI_HOME: d.store.root, DORI_MUX: d.mux.kind };
-  const pane = workspace !== undefined
-    ? await d.mux.createTab(key, cwd, workspace, env)
-    : await d.mux.createTab(key, cwd, (await d.mux.createWorkspace("dori", cwd)).workspaceId, env);
-  const kickoff = `Read your brief at ${briefPath} and execute it. Your lane key is ${key}.`;
-  await d.mux.run(pane.paneId, `${d.agentCmd} ${shq(kickoff)}`);
+export type StartInput = { readonly title?: string; readonly done: string; readonly thread?: string; readonly cwd?: string; readonly model?: string };
 
-  const now = d.now();
-  const lane: Lane = {
-    key, paneId: pane.paneId, tabId: pane.tabId, brief: briefPath, cwd,
-    status: "working", createdAt: now, lastActivityAt: now, nudges: 0,
-    log: [{ at: now, kind: "start", text: briefFile }],
-  };
-  d.store.saveLane(lane);
-  await tellLead(d, `[START ${key}] lane opened in ${pane.paneId}`, key);
-  return lane;
+export async function startLane(d: Deps, key: string, briefFile: string, opts: StartInput): Promise<{ lane: Lane; startup: string }> {
+  let r: { readonly lane: Lane; readonly startup: string };
+  try {
+    r = await launchLane(d.flow, { key, title: opts.title ?? key, brief: resolve(briefFile), done: opts.done, thread: opts.thread, model: opts.model, cwd: opts.cwd ? resolve(opts.cwd) : undefined });
+  } catch (e) {
+    if (e instanceof LaunchError) throw new Refusal(e.message);
+    throw e;
+  }
+  await tellLead(d, `[START ${key}] lane opened in ${r.lane.pane ?? "?"}: ${r.startup}`, key);
+  return r;
 }
 
-function openLane(d: Deps, key: string): Lane {
-  const lane = d.store.lane(key);
+async function openLane(d: Deps, key: string): Promise<Lane> {
+  const lane = await d.flow.registry.read(key);
   if (!lane) throw new Refusal(`no lane ${key}`);
-  if (lane.status === "done" || lane.status === "lost") throw new Refusal(`lane ${key} is ${lane.status}`);
+  if (statusOf(lane) === "closed") throw new Refusal(`lane ${key} is closed`);
   return lane;
 }
 
-export async function report(d: Deps, key: string, text: string, status?: "working" | "waiting"): Promise<void> {
-  const lane = openLane(d, key);
-  const now = d.now();
-  lane.log.push({ at: now, kind: "report", text });
-  lane.lastActivityAt = now;
-  lane.nudges = 0;
-  if (status) lane.status = status;
-  d.store.saveLane(lane);
-  await tellLead(d, `[REPORT ${key}${status === "waiting" ? " WAITING" : ""}] ${text}`, key);
+/** Records the [REPORT] line on the lane (freshness posts the last one from there), resets its quiet clock, and tells the lead. */
+export async function report(d: Deps, key: string, text: string, kind: string = "milestone"): Promise<string> {
+  if (!(REPORT_KINDS as readonly string[]).includes(kind)) throw new Refusal(`--kind must be one of ${REPORT_KINDS.join(", ")}`);
+  if (!text.trim()) throw new Refusal("a report needs text");
+  const lane = await openLane(d, key);
+  const line = `[REPORT] ${key} | ${kind} | ${text}`;
+  await d.flow.registry.write({ ...lane, lastReplyAt: d.now(), lastReport: line });
+  await tellLead(d, line, key);
+  return line;
 }
 
-export async function ready(d: Deps, key: string, text: string, evidence: readonly string[]): Promise<void> {
+/** READY is a done claim carrying the final answer: the watcher re-checks the lane's Done signals and closes it. */
+export async function ready(d: Deps, key: string, text: string, evidence: readonly string[]): Promise<string> {
   if (evidence.length === 0) throw new Refusal("READY needs at least one --evidence link (a PR, a receipt, a file)");
   if (!text.trim()) throw new Refusal("READY needs the final answer text");
-  const lane = openLane(d, key);
-  const now = d.now();
-  lane.status = "ready";
-  lane.final = { text, evidence: [...evidence], at: now };
-  lane.lastActivityAt = now;
-  lane.log.push({ at: now, kind: "ready", text });
-  d.store.saveLane(lane);
+  const lane = await openLane(d, key);
+  const claimed = await claimDone(d.flow, lane, `${text} | evidence: ${evidence.join(" ")}`);
   await tellLead(d, `[READY ${key}] ${text}\nevidence: ${evidence.join(" ")}`, key);
+  return claimed;
 }
 
-export async function done(d: Deps, key: string): Promise<void> {
-  const lane = d.store.lane(key);
-  if (!lane) throw new Refusal(`no lane ${key}`);
-  if (lane.status !== "ready") throw new Refusal(`lane ${key} is ${lane.status}, not ready: no final answer recorded`);
-  const st = await d.mux.status(lane.paneId);
-  if (st === "working" || st === "blocked") throw new Refusal(`lane ${key} pane is ${st}; let it finish first`);
-  if (st !== "gone") await d.mux.close(lane.paneId);
-  lane.status = "done";
-  lane.log.push({ at: d.now(), kind: "done", text: "closed by lead" });
-  d.store.saveLane(lane);
+/** The lead closes a lane now; Dori mode's close refuses unless every Done signal reads back live. */
+export async function done(d: Deps, key: string): Promise<string[]> {
+  const lane = await openLane(d, key);
+  if (lane.pane) {
+    const st = await d.mux.status(lane.pane);
+    if (st === "working" || st === "blocked") throw new Refusal(`lane ${key} pane is ${st}; let it finish first`);
+  }
+  const r = await closeLane(d.flow, lane, "closed by the lead");
+  if (!r.closed) throw new Refusal(r.lines.join("\n"));
+  return r.lines;
 }
 
-// ---------- duty loop ----------
+// ---------- duty session, duty loop, liveness ----------
 
 export type DutyEvent = { lane?: string; pane?: string; action: string };
+export type DutyMemory = { readonly deadSeen: Set<string>; readonly panes: DeadPaneState; readonly home: string; readonly intervalMs: number };
+export const newDutyMemory = (intervalMs = 60_000, home = process.env["HOME"] ?? ""): DutyMemory => ({ deadSeen: new Set(), panes: newDeadPaneState(), home, intervalMs });
 
-/** One proactive pass: flush inboxes of panes that became idle, nudge silent lanes, escalate, detect lost panes. */
-export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
+/**
+ * One duty pass. The duty loop owns every lane sweep: inbox delivery, LOST, freshness (the only nudger) and dead panes,
+ * plus one [ESCALATE] to the lead for a nudge a lane never answered. Each step fails alone, and the heartbeat is
+ * written last on every pass, so `dori duty-watch` and `dori up` can tell a live loop from a dead one.
+ */
+export async function dutyTick(d: Deps, mem: DutyMemory = newDutyMemory()): Promise<DutyEvent[]> {
   const events: DutyEvent[] = [];
-  for (const paneId of d.store.inboxPanes()) {
+  const step = async (name: string, fn: () => Promise<void>) => {
     try {
-      if (await flushInbox(d, paneId)) events.push({ pane: paneId, action: "flushed" });
+      await fn();
     } catch (e) {
-      if (!(e instanceof Refusal)) throw e;
-      events.push({ pane: paneId, action: "inbox-target-gone" });
+      events.push({ action: `error ${name}: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300) });
     }
-  }
-  for (const lane of d.store.lanes()) {
-    if (lane.status !== "working" && lane.status !== "waiting") continue;
-    const st = await d.mux.status(lane.paneId);
-    const now = d.now();
-    if (st === "gone") {
-      lane.status = "lost";
-      lane.log.push({ at: now, kind: "lost", text: "pane disappeared without READY" });
-      d.store.saveLane(lane);
-      await tellLead(d, `[LOST ${lane.key}] pane ${lane.paneId} closed without a final answer`, "duty");
-      events.push({ lane: lane.key, action: "lost" });
-      continue;
+  };
+  await step("inbox", async () => {
+    for (const paneId of d.store.inboxPanes()) {
+      try {
+        if (await flushInbox(d, paneId)) events.push({ pane: paneId, action: "flushed" });
+      } catch (e) {
+        if (!(e instanceof Refusal)) throw e;
+        events.push({ pane: paneId, action: "inbox-target-gone" });
+      }
     }
-    if (st === "working") {
-      lane.lastActivityAt = now;
-      d.store.saveLane(lane);
-      continue;
-    }
-    if (lane.status === "waiting" || st === "blocked") continue;
-    const idleMin = (now - lane.lastActivityAt) / 60_000;
-    const due = NUDGE_MINUTES[lane.nudges];
-    if (due === undefined || idleMin < due) continue;
-    lane.nudges += 1;
-    lane.log.push({ at: now, kind: "nudge", text: `idle ${Math.floor(idleMin)} min` });
-    d.store.saveLane(lane);
-    if (lane.nudges < NUDGE_MINUTES.length) {
-      await send(d, lane.key, prompt("nudge.md", { key: lane.key, minutes: String(Math.floor(idleMin)), dori: d.doriCmd }), "duty");
-      events.push({ lane: lane.key, action: `nudge-${lane.nudges}` });
-    } else {
-      await tellLead(d, `[ESCALATE ${lane.key}] idle ${Math.floor(idleMin)} min with no READY after ${lane.nudges - 1} nudges`, "duty");
+  });
+  await step("lanes", async () => {
+    for (const lane of await d.flow.registry.open()) {
+      if (!lane.pane) continue;
+      const now = d.now();
+      if ((await d.mux.status(lane.pane)) === "gone") {
+        if (lane.lostReportedAt || !LOST_FROM.has(statusOf(lane))) continue;
+        await d.flow.registry.write({ ...lane, lostReportedAt: new Date(now).toISOString() });
+        await tellLead(d, `[LOST ${lane.key}] pane ${lane.pane} is gone and the lane has no done claim`, "duty");
+        events.push({ lane: lane.key, action: "lost" });
+        continue;
+      }
+      const nudged = lane.lastNudgeAt ?? 0;
+      const heard = lane.lastReplyAt ?? Date.parse(lane.openedAt);
+      const waitMs = d.flow.config.nudgeAfterMin * 60_000;
+      if (statusOf(lane) !== "working" || nudged <= heard || now - nudged < waitMs || (lane.escalatedAt ?? 0) >= nudged) continue;
+      await d.flow.registry.write({ ...lane, escalatedAt: now });
+      await tellLead(d, `[ESCALATE ${lane.key}] no report for ${Math.round((now - heard) / 60_000)} min, and none since the nudge ${Math.round((now - nudged) / 60_000)} min ago`, "duty");
       events.push({ lane: lane.key, action: "escalated" });
     }
-  }
+  });
+  await step("freshness", async () => {
+    for (const a of await freshnessTick(d.flow, mem.home)) {
+      events.push({ lane: a.lane, action: `freshness ${a.kind}` });
+      if (a.kind === "working-while-paused") await tellLead(d, `[PAUSED-BUT-WORKING ${a.lane}] ${a.detail}`, "duty");
+    }
+  });
+  await step("dead-panes", async () => {
+    const roles = d.store.roles();
+    const config = { ...d.flow.config, ignorePanes: [...d.flow.config.ignorePanes, ...[roles.duty, roles["duty-loop"]].filter((p): p is string => !!p)] };
+    for (const line of await deadPaneTick(d.flow.run, config, mem.deadSeen, new Date(d.now()).toISOString().slice(0, 13), mem.panes)) {
+      const [kind = "", pane = ""] = line.split(" ");
+      events.push({ pane, action: kind.toLowerCase() });
+      await tellDuty(d, `[${kind} ${pane}] ${line}. Read its screen; restart the lane or tell the lead.`, "duty-loop");
+    }
+  });
+  d.store.beat({ at: d.now(), pid: process.pid, intervalMs: mem.intervalMs });
   return events;
+}
+
+export type WatchState = { stale: boolean };
+
+/** For the lead's persistent monitor: one DUTY_STALE when the loop stops beating, one DUTY_OK when it is back. */
+export function dutyWatchTick(d: Deps, staleMs: number, state: WatchState): string | null {
+  const beat = d.store.heartbeat();
+  const age = beat ? d.now() - beat.at : Number.POSITIVE_INFINITY;
+  if (age > staleMs) {
+    if (state.stale) return null;
+    state.stale = true;
+    return `DUTY_STALE ${beat ? `last beat ${Math.round(age / 60_000)} min ago (pid ${beat.pid})` : "no heartbeat yet"}; run: dori up`;
+  }
+  if (!state.stale) return null;
+  state.stale = false;
+  return `DUTY_OK beat ${Math.round(age / 1000)} s ago`;
+}
+
+/**
+ * Idempotent: safe to run every minute (ensure-lead.sh does). It never starts a second lead: a configured lead that is
+ * gone is left to its own restarter. It starts the duty session when it is gone, restarts its agent when only a shell
+ * is left, and replaces the duty loop when its heartbeat is older than three intervals.
+ */
+export async function up(d: Deps, cwd: string, intervalSec = 60): Promise<string[]> {
+  const out: string[] = [];
+  const env = { DORI_HOME: d.store.root, DORI_MUX: d.mux.kind };
+  let workspace = d.mux.ownWorkspace();
+  const lead = leadPane(d);
+  if (!lead) {
+    const made = await d.mux.createWorkspace("dori", cwd);
+    await d.mux.run(made.paneId, `${d.agentCmd} --append-system-prompt ${shq(renderPrompt(d, "lead.md"))}`);
+    d.store.setRole("lead", made.paneId);
+    workspace = made.workspaceId || workspace;
+    out.push(`LEAD started ${made.paneId}`);
+  } else {
+    const st = await d.mux.status(lead);
+    out.push(st === "gone" ? `LEAD ${lead} is gone; not starting another lead (its own restarter brings it back)` : `LEAD ${lead} ${st}`);
+  }
+  const dutyCmd = `${d.agentCmd} --append-system-prompt ${shq(renderPrompt(d, "duty.md"))}`;
+  const duty = d.store.roles().duty;
+  const dutySt: AgentStatus = duty ? await d.mux.status(duty) : "gone";
+  if (dutySt === "gone") {
+    const made = await d.mux.createTab("duty", cwd, workspace, env);
+    await d.mux.run(made.paneId, dutyCmd);
+    d.store.setRole("duty", made.paneId);
+    out.push(`DUTY started ${made.paneId}`);
+  } else if (dutySt === "shell") {
+    await d.mux.run(duty!, dutyCmd);
+    out.push(`DUTY restarted in ${duty}`);
+  } else out.push(`DUTY ${duty} ${dutySt}`);
+  const beat = d.store.heartbeat();
+  if (beat && d.now() - beat.at < 3 * beat.intervalMs) {
+    out.push(`LOOP alive, beat ${Math.round((d.now() - beat.at) / 1000)} s ago`);
+    return out;
+  }
+  const old = d.store.roles()["duty-loop"];
+  if (old && (await d.mux.status(old)) !== "gone") await d.mux.close(old);
+  const made = await d.mux.createTab("duty-loop", cwd, workspace, env);
+  await d.mux.run(made.paneId, `${d.doriCmd} duty --interval ${intervalSec}`);
+  d.store.setRole("duty-loop", made.paneId);
+  // A provisional beat: a second `dori up` before the loop's first pass must not replace it again.
+  d.store.beat({ at: d.now(), pid: 0, intervalMs: intervalSec * 1000 });
+  out.push(`LOOP started ${made.paneId}${old ? ` (replaced ${old})` : ""}`);
+  return out;
 }
 
 // ---------- review + merge gate ----------
