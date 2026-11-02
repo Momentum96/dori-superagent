@@ -32,7 +32,8 @@ export type ReviewReceipt = {
 };
 
 export class Store {
-  constructor(readonly root: string = process.env["DORI_HOME"] ?? join(homedir(), ".dori")) {
+  // Kept apart from Dori mode's state (~/.dori/state, ~/.dori/config.json) so the two lane registries never mix.
+  constructor(readonly root: string = process.env["DORI_HOME"] ?? join(homedir(), ".dori", "harness")) {
     for (const d of ["lanes", "inbox", "briefs", "receipts"]) mkdirSync(join(root, d), { recursive: true });
   }
 

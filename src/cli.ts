@@ -7,9 +7,23 @@ import {
 import { shq } from "./herdr.ts";
 import type { Role } from "./store.ts";
 
-const USAGE = `dori - a proactive multi-session harness on herdr + omo
+const SKILL_CLI = join(import.meta.dir, "..", "skills", "dori-mode", "scripts", "src", "cli.ts");
+const SKILL_COMMANDS: ReadonlySet<string> = new Set([
+  "launch", "adopt", "sync", "claim-done", "object-done", "close", "pause", "resume", "watch", "freshness",
+  "dead-panes", "guard", "heavy", "can-launch", "presence", "transcribe", "inbound",
+]);
+const MESSENGERS: ReadonlySet<string> = new Set(["slack", "telegram", "discord"]);
 
-  dori up [--cwd DIR]                         open lead + duty panes in a new herdr workspace
+/** Dori mode owns these commands; `send` is Dori mode's only when it names a messenger. */
+export const isSkillCommand = (argv: readonly string[]): boolean => {
+  const [cmd, x] = argv;
+  if (cmd === undefined) return false;
+  return SKILL_COMMANDS.has(cmd) || (cmd === "send" && x !== undefined && MESSENGERS.has(x));
+};
+
+const USAGE = `dori - a proactive multi-session harness on herdr (or hc) + omo
+
+  dori up [--cwd DIR]                         open lead + duty panes (herdr: a new workspace; hc: new terminals)
   dori role <lead|duty> [PANE]                register a pane as lead or duty (default: this pane)
   dori start <key> --brief FILE [--cwd DIR]   open a lane: new tab, omo session, brief + lane rules
   dori report <key> --text T [--status working|waiting]
@@ -21,7 +35,11 @@ const USAGE = `dori - a proactive multi-session harness on herdr + omo
   dori done <key>                             lead closes a READY lane
   dori status
 
---text may be omitted to read the message from stdin.`;
+--text may be omitted to read the message from stdin.
+Multiplexer: DORI_MUX=herdr|hc, or "mux" in ~/.dori/config.json (default herdr).
+
+Dori mode commands run the skill's CLI (skills/dori-mode/scripts, also installed as dori-mode):
+  ${[...SKILL_COMMANDS].join(", ")}, send <slack|telegram|discord>. Run: dori-mode help`;
 
 type Args = { pos: string[]; flags: Map<string, string[]> };
 
@@ -62,15 +80,15 @@ function renderPrompt(d: Deps, name: string): string {
 }
 
 async function up(d: Deps, cwd: string): Promise<void> {
-  const env = { DORI_HOME: d.store.root };
-  const lead = await d.herdr.createWorkspace("dori", cwd);
-  await d.herdr.run(lead.paneId, `${d.agentCmd} --append-system-prompt ${shq(renderPrompt(d, "lead.md"))}`);
+  const env = { DORI_HOME: d.store.root, DORI_MUX: d.mux.kind };
+  const lead = await d.mux.createWorkspace("dori", cwd);
+  await d.mux.run(lead.paneId, `${d.agentCmd} --append-system-prompt ${shq(renderPrompt(d, "lead.md"))}`);
   d.store.setRole("lead", lead.paneId);
-  const duty = await d.herdr.createTab("duty", cwd, lead.workspaceId, env);
-  await d.herdr.run(duty.paneId, `${d.agentCmd} --append-system-prompt ${shq(renderPrompt(d, "duty.md"))}`);
+  const duty = await d.mux.createTab("duty", cwd, lead.workspaceId, env);
+  await d.mux.run(duty.paneId, `${d.agentCmd} --append-system-prompt ${shq(renderPrompt(d, "duty.md"))}`);
   d.store.setRole("duty", duty.paneId);
-  const loop = await d.herdr.split(duty.paneId, cwd, env);
-  await d.herdr.run(loop.paneId, `${d.doriCmd} duty --interval 60`);
+  const loop = await d.mux.split(duty.paneId, cwd, env);
+  await d.mux.run(loop.paneId, `${d.doriCmd} duty --interval 60`);
   console.log(`UP lead=${lead.paneId} duty=${duty.paneId} loop=${loop.paneId} home=${d.store.root}`);
 }
 
@@ -94,7 +112,7 @@ export async function main(argv: readonly string[], d: Deps = defaultDeps()): Pr
     case "role": {
       const role = need(x, "role") as Role;
       if (!ROLES.includes(role)) throw new Refusal(`role must be one of ${ROLES.join(", ")}`);
-      const pane = need(a.pos[2] ?? process.env["HERDR_PANE_ID"], "pane id (not inside herdr?)");
+      const pane = need(a.pos[2] ?? d.mux.ownPane(), `pane id (not inside ${d.mux.kind}?)`);
       d.store.setRole(role, pane);
       console.log(`ROLE ${role}=${pane}`);
       return 0;
@@ -151,10 +169,16 @@ export async function main(argv: readonly string[], d: Deps = defaultDeps()): Pr
 }
 
 if (import.meta.main) {
-  try {
-    process.exit(await main(process.argv.slice(2)));
-  } catch (e) {
-    if (e instanceof Refusal) { console.error(e.message); process.exit(2); }
-    throw e;
+  const argv = process.argv.slice(2);
+  if (isSkillCommand(argv)) {
+    process.argv = [process.argv[0]!, SKILL_CLI, ...argv];
+    await import(SKILL_CLI);
+  } else {
+    try {
+      process.exit(await main(argv));
+    } catch (e) {
+      if (e instanceof Refusal) { console.error(e.message); process.exit(2); }
+      throw e;
+    }
   }
 }

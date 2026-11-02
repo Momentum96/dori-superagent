@@ -1,18 +1,18 @@
 # Scripts
 
-`scripts/` is a bun + TypeScript package with one CLI, `dori`. Every external command runs as an argv array; nothing builds a shell string.
+`scripts/` is a bun + TypeScript package with one CLI, installed as `dori-mode`; the repository's `dori` runs these same commands. Every external command runs as an argv array; nothing builds a shell string.
 
 ## Install and test
 
 ```sh
 cd skills/dori-mode/scripts
 bun install          # dev dependencies only (types, tsc)
-bun link             # puts `dori` on your PATH
-bun test             # behavior tests with fake herdr/git/gh; nothing real is touched
+bun link             # puts `dori-mode` on your PATH
+bun test             # behavior tests with fake herdr/hc/git/gh; nothing real is touched
 bunx tsc --noEmit    # typecheck
 ```
 
-Needs: bun 1.3+, herdr, git, and the GitHub CLI (`gh`) for `merged`/`closed` signals (npm for `published`). The `command`, `file` and `url` signals need nothing extra. The full list of signal kinds is in `sessions.md`. The host guard reads `sysctl`, `memory_pressure` and `df` on macOS; on Linux it reads `/proc/loadavg` and `df`, and memory and swap read as unknown.
+Needs: bun 1.3+, herdr or herdr-core (`hc`), git, and the GitHub CLI (`gh`) for `merged`/`closed` signals (npm for `published`). The `command`, `file` and `url` signals need nothing extra. The full list of signal kinds is in `sessions.md`. The host guard reads `sysctl`, `memory_pressure` and `df` on macOS; on Linux it reads `/proc/loadavg` and `df`, and memory and swap read as unknown.
 
 ## Configuration
 
@@ -20,6 +20,7 @@ Needs: bun 1.3+, herdr, git, and the GitHub CLI (`gh`) for `merged`/`closed` sig
 
 | Field | Default | Used by |
 |---|---|---|
+| `mux` | `herdr` | every pane command; `hc` runs them on herdr-core (`src/hc-runner.ts`). `DORI_MUX` overrides it |
 | `stateDir` | `~/.dori/state` | registry, heavy slots |
 | `laneWorkspace` | current workspace | `launch` |
 | `workspaces` | all | `sync`, `dead-panes` |

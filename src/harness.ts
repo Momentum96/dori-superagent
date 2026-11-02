@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { Herdr, shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
+import { shq, spawnExec, type AgentStatus, type Exec } from "./herdr.ts";
+import { muxFor, type Mux } from "./mux.ts";
 import { Store, type Lane, type Role } from "./store.ts";
 
 export const NUDGE_MINUTES = [10, 20, 40] as const;
@@ -10,7 +11,7 @@ const CLI = resolve(import.meta.dir, "cli.ts");
 
 export type Deps = {
   readonly store: Store;
-  readonly herdr: Herdr;
+  readonly mux: Mux;
   readonly exec: Exec;
   readonly now: () => number;
   readonly agentCmd: string;
@@ -19,13 +20,14 @@ export type Deps = {
 
 export const defaultDeps = (): Deps => {
   const store = new Store();
+  const mux = muxFor();
   return {
     store,
-    herdr: new Herdr(),
+    mux,
     exec: spawnExec,
     now: Date.now,
     agentCmd: process.env["DORI_AGENT_CMD"] ?? "omo",
-    doriCmd: process.env["DORI_CMD"] ?? `DORI_HOME=${shq(store.root)} bun ${shq(CLI)}`,
+    doriCmd: process.env["DORI_CMD"] ?? `DORI_HOME=${shq(store.root)} DORI_MUX=${mux.kind} bun ${shq(CLI)}`,
   };
 };
 
@@ -37,7 +39,7 @@ const prompt = (name: string, vars: Record<string, string>): string =>
 // ---------- pane messaging ----------
 
 export function resolveTarget(d: Deps, target: string): string {
-  if (/^w[0-9A-Za-z]+:p[0-9A-Za-z]+$/.test(target)) return target;
+  if (d.mux.isPaneId(target)) return target;
   const roles = d.store.roles();
   if (target === "lead" || target === "duty") {
     const pane = roles[target];
@@ -61,7 +63,7 @@ export async function send(d: Deps, target: string, text: string, from: string):
 export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
   const queued = d.store.queued(paneId);
   if (queued.length === 0) return true;
-  const status = await d.herdr.status(paneId);
+  const status = await d.mux.status(paneId);
   if (status === "gone") throw new Refusal(`pane ${paneId} is gone; ${queued.length} message(s) kept in its inbox`);
   if (!READY_TO_READ.includes(status)) return false;
   const body =
@@ -69,7 +71,7 @@ export async function flushInbox(d: Deps, paneId: string): Promise<boolean> {
       ? queued[0]!.text
       : `${queued.length} messages arrived while you were busy:\n\n` +
         queued.map((m, i) => `(${i + 1}) from ${m.from}:\n${m.text}`).join("\n\n");
-  await d.herdr.deliver(paneId, body, status);
+  await d.mux.deliver(paneId, body, status);
   d.store.clearInbox(paneId);
   return true;
 }
@@ -98,13 +100,13 @@ export async function startLane(
   const footer = prompt("lane-footer.md", { key, dori: d.doriCmd });
   await Bun.write(briefPath, `${readFileSync(briefFile, "utf8").trimEnd()}\n\n${footer}`);
 
-  const workspace = opts.workspace ?? process.env["HERDR_WORKSPACE_ID"];
-  const env = { DORI_LANE: key, DORI_HOME: d.store.root };
-  const pane = workspace
-    ? await d.herdr.createTab(key, cwd, workspace, env)
-    : await d.herdr.createTab(key, cwd, (await d.herdr.createWorkspace("dori", cwd)).workspaceId, env);
+  const workspace = opts.workspace ?? d.mux.ownWorkspace();
+  const env = { DORI_LANE: key, DORI_HOME: d.store.root, DORI_MUX: d.mux.kind };
+  const pane = workspace !== undefined
+    ? await d.mux.createTab(key, cwd, workspace, env)
+    : await d.mux.createTab(key, cwd, (await d.mux.createWorkspace("dori", cwd)).workspaceId, env);
   const kickoff = `Read your brief at ${briefPath} and execute it. Your lane key is ${key}.`;
-  await d.herdr.run(pane.paneId, `${d.agentCmd} ${shq(kickoff)}`);
+  await d.mux.run(pane.paneId, `${d.agentCmd} ${shq(kickoff)}`);
 
   const now = d.now();
   const lane: Lane = {
@@ -152,9 +154,9 @@ export async function done(d: Deps, key: string): Promise<void> {
   const lane = d.store.lane(key);
   if (!lane) throw new Refusal(`no lane ${key}`);
   if (lane.status !== "ready") throw new Refusal(`lane ${key} is ${lane.status}, not ready: no final answer recorded`);
-  const st = await d.herdr.status(lane.paneId);
+  const st = await d.mux.status(lane.paneId);
   if (st === "working" || st === "blocked") throw new Refusal(`lane ${key} pane is ${st}; let it finish first`);
-  if (st !== "gone") await d.herdr.close(lane.paneId);
+  if (st !== "gone") await d.mux.close(lane.paneId);
   lane.status = "done";
   lane.log.push({ at: d.now(), kind: "done", text: "closed by lead" });
   d.store.saveLane(lane);
@@ -177,7 +179,7 @@ export async function dutyTick(d: Deps): Promise<DutyEvent[]> {
   }
   for (const lane of d.store.lanes()) {
     if (lane.status !== "working" && lane.status !== "waiting") continue;
-    const st = await d.herdr.status(lane.paneId);
+    const st = await d.mux.status(lane.paneId);
     const now = d.now();
     if (st === "gone") {
       lane.status = "lost";

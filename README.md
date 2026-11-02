@@ -65,7 +65,7 @@ A lane is one omo session in its own herdr tab, started with one brief and the l
 
 The duty loop is `dori duty --interval 60`, a plain process in a pane next to a duty omo session. Each tick it flushes queued messages into panes that have gone idle, nudges lanes that have been silent, escalates to the lead, and marks a lane whose pane vanished as lost.
 
-State is JSON on disk under `~/.dori` (or `$DORI_HOME`): `lanes/`, `inbox/`, `briefs/`, `receipts/`. The only long-running process the harness adds is the duty loop, and the only runtime dependency is Bun.
+State is JSON on disk under `~/.dori/harness` (or `$DORI_HOME`): `lanes/`, `inbox/`, `briefs/`, `receipts/`. It is kept apart from Dori mode's `~/.dori/state` so the two lane registries never mix. The only long-running process the harness adds is the duty loop, and the only runtime dependency is Bun.
 
 ![lane lifecycle](docs/lane-flow.png)
 
@@ -132,7 +132,11 @@ dori merge owner/repo#12             # gh pr merge --squash --match-head-commit 
 dori done fix-flaky-login            # closes the lane's pane; only a READY lane can be closed
 ```
 
-`dori send <lead|duty|key|pane> --text '...'` delivers a message to a pane, or queues it when the pane is busy. `dori role <lead|duty> [PANE]` registers a pane by hand when you did not use `dori up`. `--text` can be left off to read the message from stdin. The commands the agents see are rendered with the full path to `src/cli.ts` and `DORI_HOME` set, so `dori` does not need to be on their PATH. Environment: `DORI_HOME` (state directory, default `~/.dori`), `DORI_AGENT_CMD` (default `omo`), `DORI_HERDR_SESSION` (a named herdr session), `DORI_CMD` (how the agents are told to call dori).
+`dori send <lead|duty|key|pane> --text '...'` delivers a message to a pane, or queues it when the pane is busy. `dori role <lead|duty> [PANE]` registers a pane by hand when you did not use `dori up`. `--text` can be left off to read the message from stdin. The commands the agents see are rendered with the full path to `src/cli.ts` and `DORI_HOME` set, so `dori` does not need to be on their PATH. Environment: `DORI_HOME` (state directory, default `~/.dori/harness`), `DORI_AGENT_CMD` (default `omo`), `DORI_HERDR_SESSION` (a named herdr session), `DORI_CMD` (how the agents are told to call dori), `DORI_MUX` (`herdr` or `hc`, see below).
+
+### On herdr-core (`hc`)
+
+The harness also runs on herdr-core. Set `DORI_MUX=hc`, or `"mux": "hc"` in `~/.dori/config.json` (the same file Dori mode reads). On hc every pane is a terminal (`t7`): `dori start` opens the lane with `hc run --bg --outlive-parent` as a login shell, labelled with the Herdr app space from `DORI_HC_SPACE` or the config's `laneWorkspace`, and messages go in with `hc send`. hc reports the agent state itself, so `dori send` and the duty loop read `idle`/`working`/`blocked`/`done` from `hc get`. `src/mux.ts` is the seam; `src/herdr.ts` and `src/hc.ts` are the two implementations, and the lanes a session starts inherit its `DORI_MUX`.
 
 ## What the harness enforces
 
@@ -154,13 +158,13 @@ Dori mode is the messenger-facing half, published in this repository on 2026-10-
 curl -fsSL https://raw.githubusercontent.com/sisyphuslabs/dori-superagent/main/install.sh | bash
 ```
 
-That clones this repo to `~/.dori/src`, links the skill into `~/.agents/skills/dori-mode`, puts Dori mode's `dori` on your PATH with `bun link`, and copies an example config to `~/.dori/config.json`. Commands, configuration, routing and the done protocol are in [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.md) and its [`references/`](skills/dori-mode/references/).
+That clones this repo to `~/.dori/src`, links the skill into `~/.agents/skills/dori-mode`, puts `dori` on your PATH with `bun link`, and copies an example config to `~/.dori/config.json`. Commands, configuration, routing and the done protocol are in [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.md) and its [`references/`](skills/dori-mode/references/).
 
-Both the harness and Dori mode ship a command named `dori`. Install one of them per machine, or run the harness as `bun src/cli.ts` and leave `dori` to Dori mode. The harness's own prompts call it by the full path to `src/cli.ts`, so the agents it starts never depend on which `dori` is on PATH.
+There is one `dori` command. The harness CLI (`src/cli.ts`) runs Dori mode's commands (`launch`, `sync`, `watch`, `dead-panes`, `guard`, `freshness`, `can-launch`, `claim-done`, `object-done`, `close`, `pause`, `resume`, `heavy`, `presence`, `transcribe`, `inbound`, and `send` to `slack`, `telegram` or `discord`) by loading Dori mode's CLI in the same process; everything else is the harness. Dori mode's CLI is also on PATH as `dori-mode`. The harness's own prompts call it by the full path to `src/cli.ts`, so the agents it starts never depend on which `dori` is on PATH.
 
 ## What this is not
 
-A minimal experiment. The harness is about 660 lines of TypeScript on Bun with zero runtime dependencies, and it is not our production stack. Left out on purpose: the cross-machine mesh, heavy-slot scheduling, the chat and ticket-tracker bridges, and receipts for whole test suites. What is here is the part that runs on herdr and omo alone: roles, lanes, the inbox, the duty loop, and the review and merge gate. Dori mode in `skills/dori-mode` is a separate CLI with its own messenger pieces, host guard and heavy-slot runner; the harness imports nothing from it.
+A minimal experiment. The harness is about 660 lines of TypeScript on Bun with zero runtime dependencies, and it is not our production stack. Left out on purpose: the cross-machine mesh, heavy-slot scheduling, the chat and ticket-tracker bridges, and receipts for whole test suites. What is here is the part that runs on herdr and omo alone: roles, lanes, the inbox, the duty loop, and the review and merge gate. Dori mode in `skills/dori-mode` is a separate CLI with its own messenger pieces, host guard and heavy-slot runner; the harness only hands it the commands it owns.
 
 ## Tests
 

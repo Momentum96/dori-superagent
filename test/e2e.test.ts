@@ -9,7 +9,7 @@ const herdrBin = Bun.which("herdr");
 const session = `dori-e2e-${process.pid}`;
 const home = mkdtempSync(join(tmpdir(), "dori-e2e-"));
 const cli = resolve(import.meta.dir, "../src/cli.ts");
-const env = { ...process.env, DORI_HOME: home, DORI_HERDR_SESSION: session };
+const env = { ...process.env, DORI_HOME: home, DORI_HERDR_SESSION: session, DORI_MUX: "herdr" };
 let server: ReturnType<typeof Bun.spawn> | undefined;
 
 const herdr = async (...argv: string[]) => {
