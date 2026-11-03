@@ -2,6 +2,7 @@ import { mkdir, open as openFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { Discord } from "./discord.ts";
+import { MessengerError } from "./http.ts";
 import type { Timers } from "./typing.ts";
 
 export type DiscordMessage = {
@@ -19,11 +20,15 @@ export type DiscordMessage = {
 export type DiscordInboundState = { scope: string; seen: string[]; channels: string[]; after?: string };
 export type DiscordInboundTransport = {
   getChannel(id: string): Promise<{ readonly type: number; readonly parent_id?: string | null }>;
-  getMessages(id: string, limit: number): Promise<DiscordMessage[]>;
+  getMessages(id: string, limit: number, before?: string): Promise<DiscordMessage[]>;
   activeThreads(): Promise<{ readonly id: string; readonly parent_id?: string | null; readonly type: number }[]>;
 };
 
 const THREAD_TYPES = [10, 11, 12];
+/** Pages of 100 read per channel when recovering back to the last delivered message. */
+const RECOVERY_PAGES = 20;
+/** Errors that mean the thread is gone or closed to the bot for good; anything else is retried next session. */
+const isPermanent = (error: unknown) => error instanceof MessengerError && (error.status === 403 || error.status === 404);
 const bySnowflake = (a: DiscordMessage, b: DiscordMessage) => (BigInt(a.id) < BigInt(b.id) ? -1 : BigInt(a.id) > BigInt(b.id) ? 1 : 0);
 
 export class DiscordInbound {
@@ -50,10 +55,10 @@ export class DiscordInbound {
     return this.enqueue(() => this.deliver(message));
   }
 
-  private async deliver(message: DiscordMessage): Promise<void> {
+  private async deliver(message: DiscordMessage, verified = false): Promise<void> {
     if (message.author.bot || message.author.id !== this.owner || this.state.seen.includes(message.id)) return;
     if (this.state.after && BigInt(message.id) <= BigInt(this.state.after)) return;
-    if (message.channel_id !== this.channel) {
+    if (!verified && message.channel_id !== this.channel) {
       const channel = await this.transport.getChannel(message.channel_id);
       if (!THREAD_TYPES.includes(channel.type) || channel.parent_id !== this.channel) return;
     }
@@ -78,24 +83,49 @@ export class DiscordInbound {
     await this.save(this.state);
   }
 
-  /** Reads the newest 100 messages of the main channel, remembered threads and active threads. A thread that cannot be read (archived, deleted, no access) is forgotten and skipped; only the main channel failing fails recovery. */
+  /**
+   * Reads the main channel, remembered threads and active threads back to the last delivered message (the newest 100 when nothing was delivered yet).
+   * The active-thread list is optional. A thread that cannot be read is skipped; it is forgotten only on 403 or 404 (archived, deleted, no access).
+   * Only the main channel failing fails recovery.
+   */
   recover(): Promise<void> {
     return this.enqueue(async () => {
-      const active = (await this.transport.activeThreads()).filter((t) => t.parent_id === this.channel);
+      const active = await this.transport.activeThreads().then((threads) => threads.filter((t) => t.parent_id === this.channel), () => []);
       const channels = new Set([this.channel, ...this.state.channels, ...active.map((t) => t.id)]);
+      // Fixed before delivering, so messages recovered in one channel do not cut short the read of the next.
+      const cutoff = [...this.state.seen, ...(this.state.after ? [this.state.after] : [])].reduce<bigint | undefined>((max, id) => (max === undefined || BigInt(id) > max ? BigInt(id) : max), undefined);
       for (const channel of channels) {
         let messages: DiscordMessage[];
         try {
-          messages = await this.transport.getMessages(channel, 100);
-        } catch {
+          if (channel !== this.channel) {
+            const thread = await this.transport.getChannel(channel);
+            if (!THREAD_TYPES.includes(thread.type) || thread.parent_id !== this.channel) throw new MessengerError("not a thread of the channel", 404);
+          }
+          messages = await this.history(channel, cutoff);
+        } catch (error) {
           if (channel === this.channel) throw new Error("main channel unavailable");
-          this.state.channels = this.state.channels.filter((id) => id !== channel);
-          await this.save(this.state);
+          if (isPermanent(error)) {
+            this.state.channels = this.state.channels.filter((id) => id !== channel);
+            await this.save(this.state);
+          }
           continue;
         }
-        for (const message of [...messages].sort(bySnowflake)) await this.deliver(message);
+        for (const message of [...messages].sort(bySnowflake)) await this.deliver(message, true);
       }
     });
+  }
+
+  private async history(channel: string, cutoff: bigint | undefined): Promise<DiscordMessage[]> {
+    const messages: DiscordMessage[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < RECOVERY_PAGES; page++) {
+      const batch = await this.transport.getMessages(channel, 100, before);
+      messages.push(...batch);
+      const oldest = batch.reduce<DiscordMessage | undefined>((min, m) => (min === undefined || BigInt(m.id) < BigInt(min.id) ? m : min), undefined);
+      if (oldest === undefined || batch.length < 100 || cutoff === undefined || BigInt(oldest.id) <= cutoff) break;
+      before = oldest.id;
+    }
+    return messages;
   }
 
   drain(): Promise<void> {
@@ -228,7 +258,7 @@ export const watchDiscordInbound = async (listener: InboundListener, inbound: Di
 
 export const discordInboundTransport = (discord: Discord, guild: string): DiscordInboundTransport => ({
   getChannel: (id) => discord.call("GET", `/channels/${id}`),
-  getMessages: (id, limit) => discord.call("GET", `/channels/${id}/messages?limit=${limit}`),
+  getMessages: (id, limit, before) => discord.call("GET", `/channels/${id}/messages?limit=${limit}${before ? `&before=${before}` : ""}`),
   activeThreads: async () => (await discord.call<{ threads?: { id: string; parent_id?: string | null; type: number }[] }>("GET", `/guilds/${guild}/threads/active`)).threads ?? [],
 });
 

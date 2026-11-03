@@ -118,11 +118,11 @@ The Dori's own messages and bot messages are skipped. Every message the Dori pos
 ### `dori inbound discord --channel ID --owner ID [--state FILE]`
 Runs until stopped. For each message the owner writes in the channel or in one of its threads, it prints one line of JSON with `event: "DORI_INBOUND"`: `messageId`, `channelId`, `authorId`, `guildId`, `content`, `mentions`, `attachments`, and the reply and forward fields. Bot messages and everyone else are skipped.
 - **Token and options:** the token comes from `DORI_DISCORD_TOKEN`. `--channel`, `--owner` and `--state` fall back to `DORI_CHANNEL_ID`, `DORI_OWNER_ID` and `DORI_INBOUND_STATE`. The state file defaults to `<stateDir>/discord-inbound.json`. Use one watcher per state file.
-- **Recovery:** on every gateway session it reads the newest 100 messages of the main channel, the threads it has seen and the channel's active threads, so nothing written while it was down is lost. A thread it can no longer read (archived, deleted, no access) is dropped from the state and skipped. Only the main channel failing stops the watcher.
+- **Recovery:** on every gateway session it reads the main channel, the threads it has seen and the channel's active threads back to the last message it delivered (up to 2,000 messages per channel; the newest 100 on a fresh state file), so nothing written while it was down is lost. If the active-thread list fails, the main channel and the threads it has seen are still read. A thread it cannot read is skipped; one that is gone or closed to the bot (403 or 404: archived, deleted, no access) is also dropped from the state, while any other error keeps it for the next session. Only the main channel failing stops the watcher.
 - **State:** it keeps the last 10,000 message ids and the thread ids, written atomically. `after` (a message id) ignores older history when moving from another bot.
 - **Ordering and replays:** one serial queue keeps recovery and live messages in order. A line is marked delivered once stdout takes it, so a crash right after can replay it. Deduplicate by `messageId`.
 - **Connection:** a dropped connection reconnects in-process. A bad token or a missing intent (Message Content must be enabled for the bot) exits nonzero.
-- **Diagnostics:** stderr carries only `DORI_WATCH <phase>` lines, never the token or raw API errors.
+- **Diagnostics:** watcher diagnostics use `DORI_WATCH` lines and never expose the token or raw API errors; argument and missing-configuration errors use their normal CLI messages.
 
 Run it under the restart loop in `setup.md`.
 
