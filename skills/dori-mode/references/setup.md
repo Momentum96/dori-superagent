@@ -67,12 +67,15 @@ Arm these as persistent monitors in your own session:
 | Monitor | Command | Filter |
 |---|---|---|
 | inbound messages | your messenger's watch command | new owner messages |
+| Discord inbound (Discord only) | `while true; do dori inbound discord --channel <id> --owner <id>; echo "DORI_WATCH_RESTART exit=$?"; sleep 5; done` | `DORI_INBOUND\|DORI_WATCH_RESTART` |
 | done flow | `dori watch` | `^LANE_` |
 | dead panes | `dori dead-panes --loop 3` | `^(DEAD_PANE\|UNRECOGNISED_PANE)` |
 | host guard | `dori guard --loop 1` | `^HOST_GUARD` |
 | freshness | `dori freshness --loop 5` | `^(NUDGED\|POSTED\|NO-REPORT\|PENDING-REPORT\|STALE-REPORT)` |
 | Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |
 | presence (optional) | `dori presence slack` or `dori presence discord` | `^PRESENCE_READY` |
+
+The Discord row restarts the watcher whenever it exits. If `DORI_WATCH_RESTART` keeps coming back, read the watcher's own `DORI_WATCH` lines (token, channel, permissions or state file) before anything else.
 
 With the harness's duty session (`dori up`, see the repository README), the duty loop runs the dead-pane and freshness sweeps itself. Then leave those two monitors out, so no lane is nudged twice, and arm `dori duty-watch --loop 1` (filter `^DUTY_`) instead: it says `DUTY_STALE` when the loop stops, and `dori up` brings it back.
 

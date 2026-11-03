@@ -21,6 +21,7 @@ import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
 import { Telegram } from "./messenger/telegram.ts";
 import { Discord, discordPresence } from "./messenger/discord.ts";
+import { DiscordGatewayListener, DiscordInbound, discordInboundTransport, loadInboundState, saveInboundState, watchDiscordInbound } from "./messenger/discord-inbound.ts";
 import { realTimers } from "./messenger/typing.ts";
 import { transcribe, TranscriptionError } from "./messenger/voice.ts";
 
@@ -45,7 +46,10 @@ const USAGE = `dori <command> [options]
   presence <slack|discord>             keep the account shown as online until stopped
   transcribe <audio-file>              run hooks.transcribe and print the text
   inbound slack [--loop MIN]           print INBOUND lines: unread thread replies (threads view), replies in threads
-                                       the Dori posted in (any helper), DMs and channels with unread mentions`;
+                                       the Dori posted in (any helper), DMs and channels with unread mentions
+  inbound discord --channel ID --owner ID [--state FILE]
+                                       long-running: print a DORI_INBOUND JSON line per owner message in the channel
+                                       and its threads (token from DORI_DISCORD_TOKEN)`;
 
 const die = (message: string, code = 1): never => {
   console.error(message);
@@ -67,6 +71,7 @@ const flags = parseArgs({
     model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string" },
     reason: { type: "string", multiple: true }, note: { type: "string" }, write: { type: "boolean" }, loop: { type: "string" },
     to: { type: "string" }, text: { type: "string" }, edit: { type: "string" },
+    channel: { type: "string" }, owner: { type: "string" }, state: { type: "string" },
   },
 });
 const opt = (name: string): string | undefined => {
@@ -228,7 +233,36 @@ try {
       break;
     }
     case "inbound": {
-      if (key !== "slack") die("inbound supports slack");
+      if (key === "discord") {
+        const token = process.env.DORI_DISCORD_TOKEN ?? die("DORI_DISCORD_TOKEN is not set");
+        const channel = opt("channel") ?? process.env.DORI_CHANNEL_ID ?? "";
+        const owner = opt("owner") ?? process.env.DORI_OWNER_ID ?? "";
+        if (!/^\d+$/.test(channel) || !/^\d+$/.test(owner)) die("--channel and --owner (or DORI_CHANNEL_ID, DORI_OWNER_ID) must be Discord ids");
+        const file = opt("state") ?? process.env.DORI_INBOUND_STATE ?? `${config.stateDir}/discord-inbound.json`;
+        const controller = new AbortController();
+        process.once("SIGINT", () => controller.abort());
+        process.once("SIGTERM", () => controller.abort());
+        try {
+          const discord = new Discord(fetchHttp, realClock, token);
+          const guild = (await discord.call<{ guild_id?: string }>("GET", `/channels/${channel}`)).guild_id ?? die("DORI_WATCH failed; the channel is not in a server");
+          const inbound = new DiscordInbound(channel, owner, await loadInboundState(file, channel, owner), discordInboundTransport(discord, guild),
+            (line) => new Promise<void>((resolve, reject) => process.stdout.write(`${line}\n`, (e) => (e ? reject(e) : resolve()))),
+            (state) => saveInboundState(file, state));
+          const listener = new DiscordGatewayListener(() => {
+            const ws = new WebSocket("wss://gateway.discord.gg/?v=10&encoding=json");
+            let onMessage: (d: string) => void = () => {};
+            let onClose: (code: number) => void = () => {};
+            ws.addEventListener("message", (e) => onMessage(String(e.data)));
+            ws.addEventListener("close", (e) => onClose(e.code));
+            return { send: (d) => ws.send(d), close: () => ws.close(), onMessage: (cb) => { onMessage = cb; }, onClose: (cb) => { onClose = cb; } };
+          }, token, { ...realTimers, setTimeout: (cb, ms) => setTimeout(cb, ms) });
+          await watchDiscordInbound(listener, inbound, controller.signal, (phase) => console.error(`DORI_WATCH ${phase}`));
+        } catch {
+          die("DORI_WATCH failed; check DORI_DISCORD_TOKEN, channel, owner, permissions and the state file");
+        }
+        break;
+      }
+      if (key !== "slack") die("inbound supports slack or discord");
       const auth = { token: process.env.DORI_SLACK_TOKEN ?? die("DORI_SLACK_TOKEN is not set"), cookie: process.env.DORI_SLACK_COOKIE };
       const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
       const slack = new Slack(fetchHttp, realClock, auth, undefined, ledger);
