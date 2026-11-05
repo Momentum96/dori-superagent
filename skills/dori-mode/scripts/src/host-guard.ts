@@ -27,15 +27,19 @@ export const sampleHost = async (run: Runner, dataPath = "/", mux: Mux = "herdr"
   const loadLinux = load.code === 0 ? null : await run(["cat", "/proc/loadavg"]);
   const load1 = num((load.code === 0 ? load.out.replace(/[{}]/g, "").trim() : loadLinux?.out ?? "").split(/\s+/)[0], 0);
   const mp = await run(["memory_pressure", "-Q"]);
-  const meminfo = mp.code === 0 ? null : await run(["cat", "/proc/meminfo"]);
-  const kb = (key: string): number => num(new RegExp(`^${key}:\\s+(\\d+) kB`, "m").exec(meminfo?.out ?? "")?.[1], NaN);
+  const memInfo = mp.code === 0 ? null : await run(["cat", "/proc/meminfo"]);
+  const kb = (key: string): number | null => {
+    const m = new RegExp(`^${key}:\\s+(\\d+)`, "m").exec(memInfo?.out ?? "");
+    return m ? Number(m[1]) : null;
+  };
+  const total = kb("MemTotal"), available = kb("MemAvailable");
   const memFreePct = mp.code === 0
     ? num(/free percentage: (\d+)%/.exec(mp.out)?.[1], 100)
-    : kb("MemTotal") > 0 ? Math.round((kb("MemAvailable") / kb("MemTotal")) * 100) : 100;
+    : total !== null && total > 0 && available !== null ? Math.round((available / total) * 100) : 100;
   const df = await run(["df", "-k", dataPath]);
   const diskFreeGb = num(df.out.split("\n").at(-1)?.trim().split(/\s+/)[3], 0) / 1_048_576;
   const swap = await run(["sysctl", "-n", "vm.swapusage"]);
-  const swapFreeGb = swap.code === 0 ? num(/free = ([\d.]+)M/.exec(swap.out)?.[1], 0) / 1024 : num(String(kb("SwapFree")), 0) / 1_048_576;
+  const swapFreeGb = swap.code === 0 ? num(/free = ([\d.]+)M/.exec(swap.out)?.[1], 0) / 1024 : (kb("SwapFree") ?? 0) / 1_048_576;
   let panes: number;
   if (mux === "hc") panes = await hcPanes(run);
   else {

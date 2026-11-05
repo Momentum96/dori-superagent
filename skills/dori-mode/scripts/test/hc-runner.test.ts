@@ -97,9 +97,25 @@ test("process-info reports the terminal pid as the shell pid; pane close kills, 
   const w = world();
   const run = hcRunner(fakeHc(w));
   const info = await run(["herdr", "pane", "process-info", "--pane", "t4"]);
-  expect(JSON.parse(info.out)).toEqual({ result: { process_info: { shell_pid: 44 } } });
+  expect(JSON.parse(info.out)).toEqual({ result: { process_info: { shell_pid: 44, foreground_processes: [{ name: "omo" }] } } });
   expect((await run(["herdr", "pane", "close", "t4"])).code).toBe(0);
   expect(w.calls.slice(1).map((c) => c[1])).toEqual(["kill", "wait", "rm"]);
+});
+
+test.each([
+  { name: "zsh" },
+  { name: "powershell", argv: ["powershell", "-Command", "omo", "-NoE"] },
+  undefined,
+])("a stale agent status cannot paste into a shell or unknown foreground %#", async (foreground) => {
+  const w = world();
+  const upstream = fakeHc(w);
+  const run = hcRunner(async (argv) => {
+    if (argv[1] === "get" && argv[2] === "t4") return ok({ pid: 44, status: { app: "omo", state: "idle" }, foreground });
+    return upstream(argv);
+  });
+  expect(await sendVerified(run, fakeClock(0), "t4", "hello")).toBe("failed");
+  expect((await run(["herdr", "pane", "send-text", "t4", "hello"])).code).toBe(1);
+  expect(w.calls.some((call) => call[1] === "send")).toBe(false);
 });
 
 test("non-herdr commands pass through and unknown herdr commands fail loudly", async () => {

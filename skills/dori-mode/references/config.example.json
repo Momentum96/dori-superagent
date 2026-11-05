@@ -16,10 +16,25 @@
   ],
   "defaultModel": "anthropic/claude-opus-5-5",
   "launchKeywords": "ulw set goal and work",
+  "goalMarker": "Pursuing goal",
   "sessionsDir": "~/.omo/agent/sessions",
   "nudgeAfterMin": 15,
   "postAfterMin": 20,
   "closeAfterMin": 5,
+  "repoIdentities": {
+    "my-org/my-project": {
+      "name": "Your Name",
+      "email": "12345+you@users.noreply.github.com"
+    }
+  },
+  "supervision": {
+    "hungAfterMinutes": 20,
+    "staleAfterMinutes": 20,
+    "defaults": { "wallMinutes": null, "tokens": null, "costUsd": null },
+    "lanes": {},
+    "activityPaths": [],
+    "gitActivity": true
+  },
   "heavySlots": 1,
   "heavyMaxLoad": 80,
   "deadPanePatterns": [

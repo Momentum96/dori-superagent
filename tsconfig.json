@@ -11,6 +11,9 @@
     "skipLibCheck": true,
     "types": [
       "bun"
+    ],
+    "lib": [
+      "ESNext"
     ]
   },
   "include": [

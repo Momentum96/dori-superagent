@@ -4,7 +4,7 @@
 
 # dori-superagent
 
-複数セッションのコーディングエージェントを能動的に回すハーネスです。TypeScript 約 660 行で、[herdr](https://github.com/herdrdev/herdr) と [omo](https://github.com/code-yeongyu/oh-my-openagent) の上で動きます。
+複数セッションのコーディングエージェントを能動的に回すハーネスです。TypeScript 約 1,600 行で、[herdr](https://github.com/herdrdev/herdr) と [omo](https://github.com/code-yeongyu/oh-my-openagent) の上で動きます。
 
 [English](README.md) | [한국어](README.ko.md) | [简体中文](README.zh-CN.md) | 日本語
 
@@ -63,9 +63,9 @@ lead は人と会話する唯一のセッションです。依頼を brief に�
 
 lane は専用の herdr タブに立てた omo セッション一つで、brief 一つの末尾に lane ルール（`prompts/lane-footer.md`）を付けた状態で起動します。途中経過は `dori report` で報告し、`dori ready` で終えます。`dori ready` はエビデンスのリンクなしでは送信を拒否します。
 
-duty ループは `dori duty --interval 60` です。duty 用の omo セッションの隣のペインで動く、ただのプロセスです。tick ごとに、idle になったペインへ溜まったメッセージを流し込み、黙っている lane を催促し、lead にエスカレーションし、ペインが消えた lane を lost 扱いにします。
+duty ループは `dori duty --interval 60` です。duty 用の omo セッションの隣のペインで動く、ただのプロセスです。tick ごとに、idle になったペインへ溜まったメッセージを流し込み、黙っている lane を催促し、lead にエスカレーションし、ペインが消えた lane を lost 扱いにします。緊急停止は `dori duty stop --text '理由'` です。`dori duty resume` までは tick ごとに `DUTY stopped: <理由>` を出力するだけで、duty の仕事はすべて飛ばします（流し込み、催促、エスカレーション、duty のカウントなし）。溜まったメッセージは inbox で待ちます。`dori duty status` は止まっているかどうかとその理由を表示します。
 
-状態は `~/.dori`（または `$DORI_HOME`）配下の JSON です。`lanes/`、`inbox/`、`briefs/`、`receipts/`。ハーネスが増やす常駐プロセスは duty ループだけで、ランタイム依存も Bun だけです。
+状態は `~/.dori`（または `$DORI_HOME`）配下の JSON です。`lanes/`、`inbox/`、`briefs/`、`receipts/`、それに 1 時間ループが使う `backlog/` と `loop/`、duty ループの停止ファイルを置く `duty/`。エージェントのセッションを除けば、ハーネスが増やす常駐プロセスは duty ループと 1 時間ループの 2 つだけで、ランタイム依存は Bun だけです。
 
 ![lane lifecycle](docs/lane-flow.png)
 
@@ -80,7 +80,7 @@ duty ループは `dori duty --interval 60` です。duty 用の omo セッシ�
 | Ticket + Mandate | brief ファイル + lane ルールのフッター、そしてエビデンス必須の READY | `~/.dori/briefs/<key>.md`、`src/harness.ts` の `ready()` |
 | トリガーのバッチ化: イベントをターン単位でまとめる | ペインの inbox: 忙しいペイン宛てのメッセージはキューに入り、idle になった時点で一括で届く | `src/harness.ts` の `send()`、`flushInbox()`。`src/store.ts` の `inbox/` |
 | Watchdog | DUTY ループ: inbox を流し、10/20 分で催促、40 分でエスカレーション、消えたペインを検知 | `src/harness.ts` の `dutyTick()`、`prompts/duty.md`、`prompts/nudge.md` |
-| Admission matrix、`maxWorkers`（デフォルト 3） | なし。`dori start` が拒否するのは、すでに開いている key だけ | `src/harness.ts` の `startLane()` |
+| Admission matrix、`maxWorkers`（デフォルト 3） | 1 時間ループの予算: 開いている lane は `--max-lanes`（デフォルト 3）まで、1 回 `--max-starts`（デフォルト 2）まで、負荷の高いホストでは始めない | `src/loop.ts` の `loopTick()` |
 | プロトタイプにはない | ゲート付きマージ: head SHA に厳密に一致する CLEAR の receipt と、グリーンのチェック。空のチェック一覧はグリーン扱いしない | `src/harness.ts` の `review()`、`mergeGate()`、`prompts/review.md`、`src/store.ts` の `receipts/` |
 | プロトタイプにはない | 窓口一本化のルール: lane と duty は人に話しかけない | `prompts/lead.md`、`prompts/duty.md`、`prompts/lane-footer.md` |
 | プロトタイプにはない | 回答の全文台帳: lane ごとの最終回答、エビデンスのリンク、ログをディスクに保存 | `src/store.ts` の `Lane.final`、`Lane.log` |
@@ -100,17 +100,17 @@ herdr を起動し、シェルから:
 
 ```sh
 dori up
-# UP lead=w1:p1 duty=w1:p2 loop=w1:p3 home=~/.dori
+# UP lead=w1:p1 duty=w1:p2 loop=w1:p3 hourly=w1:p4 home=~/.dori
 ```
 
-これで `dori` という名前の herdr ワークスペースが開き、lead ペイン（システムプロンプトに `prompts/lead.md` を追記した omo）、duty ペイン（`prompts/duty.md` を追記した omo）、その下に duty ループが立ちます。話しかける相手は lead ペインです。lead は brief（目標、入力、成果物、終了条件、制約。[`examples/brief.md`](examples/brief.md) を参照）を書いて自分で lane を開きます。同じことはシェルからもできます。
+これで `dori` という名前の herdr ワークスペースが開き、lead ペイン（システムプロンプトに `prompts/lead.md` を追記した omo）、duty ペイン（`prompts/duty.md` を追記した omo）、その下に duty ループ、さらにその下に 1 時間ループが立ちます。話しかける相手は lead ペインです。lead は brief（目標、入力、成果物、終了条件、制約。[`examples/brief.md`](examples/brief.md) を参照）を書いて自分で lane を開きます。同じことはシェルからもできます。
 
 ```sh
 dori start fix-flaky-login --brief examples/brief.md
-# STARTED fix-flaky-login pane=w1:p4 brief=~/.dori/briefs/fix-flaky-login.md
+# STARTED fix-flaky-login pane=w1:p5 brief=~/.dori/briefs/fix-flaky-login.md
 dori status
 # lead=w1:p1 duty=w1:p2 home=~/.dori
-# fix-flaky-login          working  w1:p4    active 0m ago  start: examples/brief.md
+# fix-flaky-login          working  w1:p5    active 0m ago  start: examples/brief.md
 ```
 
 lane の key は `^[a-z][a-z0-9-]{1,40}$` に一致する必要があり、すでに開いている key は拒否されます。
@@ -140,11 +140,34 @@ dori done fix-flaky-login            # closes the lane's pane; only a READY lane
 
 READY にはエビデンスが要ります。`dori ready` は、`--evidence` のリンクが一つもないか、最終回答のテキストがなければ拒否します（`src/harness.ts` の `ready()`）。テキストとリンクは lane レコードの `final` に保存され、`dori done` は `ready` でない lane を拒否します。記録された回答なしに閉じる lane はありません。
 
-忙しいペインには割り込みません。`dori send` はまず herdr にペインのエージェント状態を問い合わせます。`idle`、`done`、素のシェルならその場で届け、それ以外は `~/.dori/inbox/` のキューに入れて `QUEUED` と表示します。duty ループはペインが idle になった時点でキューをまとめて一通のメッセージとして届けます。その先頭は "N messages arrived while you were busy" です（`src/harness.ts` の `send()` と `flushInbox()`）。`dori done` も同じ流儀で待ちます。herdr が working または blocked と報告するペインは閉じません。
+忙しいペインには割り込みません。`dori send` はまず herdr にペインのエージェント状態を問い合わせます。`idle` か `done` ならその場で届け、それ以外は `~/.dori/inbox/` のキューに入れて `QUEUED` と表示します。手前でエージェントが動いていないペイン（エージェントが終了した、または Ctrl+Z で止まってシェルが手前に出た状態）には決して入力しません。シェルに入力したテキストはコマンドとして実行されるからです。そのペイン宛てのメッセージはキューに残り、エージェントが戻るまで duty ループが `inbox-held` を表示します。素のシェルにあえて入力するときは、運用者が `--to-shell` を付けます。その一通だけに効き、キューにあるメッセージには効きません。duty ループはペインが idle になった時点でキューをまとめて一通のメッセージとして届けます。その先頭は "N messages arrived while you were busy" です（`src/harness.ts` の `send()` と `flushInbox()`）。`dori done` も同じ流儀で待ちます。herdr が working または blocked と報告するペインは閉じません。
 
 10 分、20 分、40 分で催促します。`src/harness.ts` の `NUDGE_MINUTES = [10, 20, 40]` です。10 分間報告がなく、ペインも working でない lane は、自分のペインに `prompts/nudge.md` を受け取ります。20 分でもう一度。40 分で duty ループは催促をやめ、lead に `[ESCALATE <key>]` を送ります。`working` のペインはアイドル時間をリセットし、`--status waiting` で報告した lane やペインが `blocked` の lane には触れません。新しい報告があれば催促の回数は 0 に戻り、ペインが消えれば `[LOST <key>]` として報告されます。
 
 マージには、head SHA に厳密に一致する CLEAR の receipt と、グリーンのチェックが要ります。`dori merge` は `gh` で PR の head SHA を読み、その SHA に対する verdict が `CLEAR` の receipt が `~/.dori/receipts/` にあることを要求します。receipt を書くのは `dori review` だけです。`dori review` は、その SHA に固定した `prompts/review.md` で新しい非対話モードの omo（`omo -p --no-session`、必要なら `--model` も）を走らせ、レビュアーが `VERDICT:` 行を出さなければ receipt を書きません。次に `gh pr checks` がチェックを一つ以上返し、すべてのチェックが `pass` か `skipping` で、そのうち一つ以上が `pass` でなければなりません。空のチェック一覧は "an empty check list is never green" と言って拒否します。マージ自体は `gh pr merge --squash --match-head-commit <sha>` です。レビュー後に push すると head SHA が変わり、receipt が一致しなくなるのでマージは拒否されます（`src/harness.ts` の `review()` と `mergeGate()`）。
+
+## 1 時間ループ
+
+`dori up` は 4 つ目のペインで `dori loop` も起動します。1 時間ごとにハーネスの状態を実際と突き合わせ、誰の判断も要らない次の仕事を自分で始めます。次に何をやるかを lead が覚えておく必要はありません。設計の全体は [`docs/hourly-loop.md`](docs/hourly-loop.md) にあります。
+
+仕事は `~/.dori/backlog/` のバックログに、1 項目につき brief 1 つで並びます。lead が追加するか、ラベル付きの開いている GitHub issue を取り込みます。
+
+```sh
+dori backlog add search-index --brief briefs/search.md --priority 2
+dori backlog add new-billing --brief briefs/billing.md --decision 'シート課金かワークスペース課金か?'
+dori backlog import owner/repo --label dori     # p1..p9 ラベルは優先度、needs-decision ラベルは質問
+dori backlog list
+```
+
+ループはまず関門を見ます。止められているとき、別のループがロックを持っているとき、前回の実行から間隔（デフォルト 1 時間。`--force` ならこの確認を飛ばします）がたっていないときは何もしません。関門を通った実行は、次の 5 つをこの順番で行います。
+
+1. 同期。lane が終わった項目、READY の PR がマージされた項目は done になります。lane が lost になった項目はキューに戻り、2 回失うと質問に変わります。取り込んだ issue が閉じられた項目は外れます。
+2. 取りこぼしの点検。3 時間報告のない lane、READY のまま 2 時間誰も閉じていない lane、ペインが消えた lane を拾います。
+3. 次の仕事を引く。質問の付いていない開いた項目を、優先度、次に古い順で始めます。開始に 2 回失敗した項目は質問に変わるので、後ろの項目を止めません。開いている lane は `--max-lanes`（デフォルト 3）まで、1 回あたり `--max-starts`（デフォルト 2）までです。1 分間のロードがコア数（または `--max-load`）を超えているか、使えるメモリが 10% を切っていると（macOS では空きページだけだと常に 0 近くになるので、カーネルの利用可能メモリの値を使います）何も始めません。
+4. 尋ねる。開いている質問は `[DECIDE <id>]` として lead に 1 回届き、6 時間後に 1 回だけ再送されます。lead が人に尋ね、答えを `dori backlog decide <id> --text '...'` で記録するか（答えは項目の brief の末尾に追記されます）、`dori backlog drop <id>` で外します。
+5. 報告。開いている lane の数と上限、バックログの件数、ホストのロードと空きメモリ、見つけたことを `[LOOP ...]` メッセージ 1 つで lead に送ります。関門を通った実行は `~/.dori/loop/runs/` にも記録が残ります。
+
+自分の状態ファイル（バックログ項目、実行記録、ロック）を除けば、ループがするのは lane を開くこととメッセージを送ることだけです。マージ、プッシュ、ペインを閉じることはせず、開いている lane の記録も書き換えません（lost になった項目をやり直すときは同じ key で新しい lane を開きます）。`gh` は読むだけです。緊急停止は `dori loop stop --text '理由'` です。`dori loop resume` までは毎回何もしません。ロックと最終実行の記録があるので、ループが 2 つあっても同じ時間帯を 2 回走ることはなく、cron から `dori loop --once` を併用しても安全です。`dori loop status` は最後の実行を表示します。
 
 ## Dori モード（`skills/dori-mode`）
 
@@ -160,17 +183,37 @@ curl -fsSL https://raw.githubusercontent.com/sisyphuslabs/dori-superagent/main/i
 
 ## これは何ではないか
 
-最小の実験です。ハーネスは Bun 上の TypeScript 約 660 行でランタイム依存はゼロ、私たちの本番スタックではありません。意図して外したもの: マシン間のメッシュ、heavy-slot のスケジューリング、チャットとチケットトラッカーのブリッジ、テストスイート全体に対する receipt。ここにあるのは herdr と omo だけで動く部分です。役割、lane、inbox、duty ループ、レビューとマージのゲート。`skills/dori-mode` の Dori モードは、独自のメッセンジャー部品、ホストガード、heavy-slot ランナーを持つ別の CLI で、ハーネスはそこから何も import しません。
+最小の実験です。ハーネスは Bun 上の TypeScript 約 1,600 行でランタイム依存はゼロ、私たちの本番スタックではありません。意図して外したもの: マシン間のメッシュ、heavy-slot のスケジューリング、チャットとチケットトラッカーのブリッジ、テストスイート全体に対する receipt。ここにあるのは herdr と omo だけで動く部分です。役割、lane、inbox、duty ループ、1 時間ループとバックログ、レビューとマージのゲート。`skills/dori-mode` の Dori モードは、独自のメッセンジャー部品、ホストガード、heavy-slot ランナーを持つ別の CLI で、ハーネスはそこから何も import しません。
+
+## テレメトリ
+
+dori は omo と同じやり方で匿名の利用回数を送ります。OTLP/HTTP の JSON ログを、omo のコレクター `https://t.omo.dev` に送ります。識別子は `~/.dori/telemetry.json` に置いたランダムなインストール id で、送るのはその sha256 だけです。初回の送信時に、コレクターがそのハッシュからインストールごとの ingest key を発行します（`POST /v1/register`）。key は `~/.dori/telemetry.json` にキャッシュし、コレクターが 401 を返したら発行し直します。コードには共有の key は入っていません。初回の実行では一行の通知を表示します。`DORI_TELEMETRY=0` で止まります（`DO_NOT_TRACK=1` でも止まります）。`DORI_TELEMETRY_ENDPOINT` でコレクターの URL を差し替えられます。
+
+| イベント | いつ | フィールド |
+|---|---|---|
+| `dori.installed` | 初回の実行 | なし |
+| `dori.daily_active` | どの dori コマンドでも、UTC の一日に一回 | `day_utc` |
+| `dori.lane_started` | `dori start` | `open_lanes` |
+| `dori.lane_ready` | `dori ready` | `evidence_count`、`lane_minutes` |
+| `dori.review_completed` | `dori review` | `verdict`: `CLEAR` または `BLOCK` |
+| `dori.merge_decided` | `--dry-run` なしの `dori merge` | `outcome`: `merged`、`no_receipt`、`review_block`、`no_checks`、`checks_red`、`checks_all_skipped` |
+| `dori.duty_summary` | duty ループから一時間に最大一回 | `ticks`、`flushed`、`nudges`、`escalations`、`lost` |
+
+日次、週次、月次のアクティブ数は `dori.daily_active` から数えます。アクティブ数はインストール単位で数えるので、同時に起動した二つの実行がまれに二回送っても数は変わりません。どのレコードにもリソースフィールドが付きます。サービス名とバージョン、インストールのハッシュ、CI フラグ、OS の種類（`darwin`、`linux`、`windows` のいずれか。それ以外の OS では何も送りません）とバージョン、CPU アーキテクチャです。パス、リポジトリ名、PR 番号、lane の key、brief、メッセージ、その他のテキストは一切送りません。送信はバックグラウンドで行い、リクエストごとのタイムアウトは 2 秒です。コマンドは終了前に最大 2 秒だけ待ち、テレメトリが失敗してもコマンドは失敗しません。
 
 ## テスト
 
-リポジトリのルートで `bun test ./test/` を実行すると、ハーネスの 9 個のテストが走ります。モデルは呼びません。素の `bun test` だと Dori モードのテストも拾います。
+リポジトリのルートで `bun test ./test/` を実行すると、ハーネスの 76 個のテストが走ります。モデルは呼びません。素の `bun test` だと Dori モードのテストも拾います。
 
-ユニットテスト 8 個（`test/harness.test.ts`）は偽の herdr（`test/fake.ts`）に対して走ります。`herdr` と `gh` のバイナリの代わりを務めるレコーダーで、エージェント状態を設定できるペインを持ち、テストから進められる時計を持っています。カバーするのは、lane の開始と READY、忙しい lead に対するキューと一括配信、未知の宛先の拒否、10 分と 20 分の催促と 40 分のエスカレーションと WAITING の lane の放置、working と lost の状態、マージゲートの全分岐（receipt なし、BLOCK、空のチェック一覧、赤いチェック、全部スキップ、CLEAR とグリーン）、そして VERDICT 行のないレビュアーです。
+ハーネスのユニットテスト 8 個（`test/harness.test.ts`）は偽の herdr（`test/fake.ts`）に対して走ります。`herdr` と `gh` のバイナリの代わりを務めるレコーダーで、エージェント状態を設定できるペインを持ち、テストから進められる時計を持っています。カバーするのは、lane の開始と READY、忙しい lead に対するキューと一括配信、未知の宛先の拒否、10 分と 20 分の催促と 40 分のエスカレーションと WAITING の lane の放置、working と lost の状態、マージゲートの全分岐（receipt なし、BLOCK、空のチェック一覧、赤いチェック、全部スキップ、CLEAR とグリーン）、そして VERDICT 行のないレビュアーです。
 
-エンドツーエンドテスト 1 個（`test/e2e.test.ts`）は、隔離した名前付きセッションで本物の herdr サーバーを起動し、ワークスペースを作り、lead ペインを登録して、omo の代わりに `test/fixtures/fake-agent.sh` をエージェントにした lane を開始します。このスクリプトは brief を読んで `dori report` と `dori ready` を呼び、テストは `[START]`、`[REPORT]`、`[READY]` が lead ペインに届くことと、`dori done` が lane を閉じることを確認します。PATH に `herdr` がなければスキップされます。`bun run typecheck` は `tsc --noEmit` を実行します。
+さらにユニットテスト 19 個（`test/loop.test.ts`）が、同じ偽物の上で 1 時間ループを動かします。バックログの追加、決定、外す、取り込み、開始の順番と予算、lane が埋まっている・ホストが忙しい・質問が付いているときの保留、done・lost・マージ済みの lane の同期、取りこぼしの点検、質問ごとに 1 回尋ねて 1 回だけ再送、緊急停止、生きている・死んでいる・壊れたロック、実行中に奪われたロック、戻せずに脇に残したロック、lane 開始の失敗、開始が失敗し続けて質問に変わる項目、実行と実行の間の待ち時間、開いたのに lead へ知らせられなかった lane、バックログのフォルダから出ようとする id、消えた lane の記録、同じミリ秒の 2 回の実行です。そのうち 2 個はループがペインの close、merge、push を一度も送らないことを確かめ、点検のテストは lane の記録がバイト単位で変わらないことも確かめます。
 
-Dori モードには、偽の herdr、git、gh に対する独自のテストが 68 個あります。
+テレメトリのユニットテスト 11 個（`test/telemetry.test.ts`）は、オプトアウト、初回の通知と一日一回の `dori.daily_active`、インストールごとの key が一度だけ発行されてキャッシュされ 401 の後に発行し直されること、登録済みのスキーマに合うペイロード（scope の名前とバージョン、許可されたリソースキーのみ、回数のみ）、コレクターが 200 応答の中で拒否したレコード（`partialSuccess.rejectedLogRecords`）を数えること、一時間ごとの duty サマリー、オフラインの初回実行でも送信が成功するまで `dori.installed` と `dori.daily_active` を保留すること、状態ファイルの権限が 0600 で壊れた状態ファイルでも throw しないこと、呼び出しがすぐ戻り flush が期限で諦めること、同じホームで同時に始まった二つの初回実行が一つのインストール id を共有すること、そしてコレクターに届かないか登録を拒否されても throw せずログも送らないことを確認します。
+
+エンドツーエンドテスト 2 個（`test/e2e.test.ts`）のうち 1 個目は、隔離した名前付きセッションで本物の herdr サーバーを起動し、ワークスペースを作り、lead ペインを登録して、omo の代わりに `test/fixtures/fake-agent.sh` をエージェントにした lane を開始します。このスクリプトは brief を読んで `dori report` と `dori ready` を呼び、テストは `[START]`、`[REPORT]`、`[READY]` が lead ペインに届くことと、`dori done` が lane を閉じることを確認します。2 個目はバックログに項目を足して `dori loop --once` を実行し、ループが始めた lane が READY まで行くこと、`[LOOP ...]` が lead ペインに届くこと、`dori loop stop` の後の実行が何もしないことを確認します。どちらも PATH に `herdr` がなければスキップされ、`DORI_TELEMETRY=0` で走ります。`bun run typecheck` は `tsc --noEmit` を実行します。
+
+Dori モードには、偽の herdr、git、gh に対する独自のテストが 254 個あります。
 
 ```sh
 cd skills/dori-mode/scripts && bun install && bun test

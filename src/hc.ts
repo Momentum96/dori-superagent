@@ -2,7 +2,7 @@
 // terminal (`t7`), and a workspace is the Herdr app space the terminal is labelled with (`herdr.space`).
 // Terminals are started with --outlive-parent so lanes survive the session that opened them.
 
-import { spawnExec, type AgentStatus, type Exec, type ExecResult, type PaneRef } from "./herdr.ts";
+import { interactiveShellInFront, spawnExec, type AgentStatus, type Exec, type ExecResult, type PaneRef } from "./herdr.ts";
 import type { Mux } from "./mux.ts";
 
 const ADDRESS = /^(?:[a-z0-9_-]+\/)?t[0-9][0-9a-z]*$/;
@@ -21,6 +21,7 @@ type Terminal = {
   readonly state?: string;
   readonly status?: { readonly app?: string | null; readonly state?: string | null } | null;
   readonly labels?: Readonly<Record<string, string>>;
+  readonly foreground?: { readonly name?: string; readonly argv?: readonly string[] } | null;
 };
 
 type Start = { name?: string; cwd: string; space?: string; labels: Record<string, string>; env: Record<string, string> };
@@ -87,9 +88,18 @@ export class Hc implements Mux {
     return AGENT_STATES.includes(state as AgentStatus) ? (state as AgentStatus) : "unknown";
   }
 
-  /** `hc send` pastes the text as one argv element and presses Enter, for agents and shells alike. */
-  async deliver(paneId: string, text: string, _kind: AgentStatus): Promise<void> {
+  /** Recheck immediately before sending: a terminal may have lost its agent since inbox inspection. */
+  async deliver(paneId: string, text: string): Promise<boolean> {
+    const terminal = await this.get(paneId);
+    if (!terminal || terminal.state !== "live" || !terminal.status?.app ||
+        (terminal.status.state !== "idle" && terminal.status.state !== "done") ||
+        interactiveShellInFront({ foreground_processes: terminal.foreground?.name ? [terminal.foreground] : [] })) return false;
     await this.call(["send", paneId, text]);
+    return true;
+  }
+
+  async typeIntoShell(_paneId: string, _text: string): Promise<boolean> {
+    return false;
   }
 
   read(paneId: string, lines = 80): Promise<string> {

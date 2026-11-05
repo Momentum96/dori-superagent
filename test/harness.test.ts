@@ -1,5 +1,6 @@
+import { Reports } from "../skills/dori-mode/scripts/src/reports.ts";
 import { describe, expect, test } from "bun:test";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { statusOf } from "../skills/dori-mode/scripts/src/registry.ts";
 import {
@@ -25,7 +26,7 @@ describe("one lane registry", () => {
     const { w, d, lead, brief, open } = setup();
     const { lane } = await open("fix-login");
     expect(await d.flow.registry.read("fix-login")).toMatchObject({ key: "fix-login", pane: lane.pane, thread: "discord:42", done: `file ${brief}` });
-    expect(await Bun.file(brief).text()).toContain("dori report fix-login --kind");
+    expect(await Bun.file(brief).text()).toContain("report fix-login --kind");
     expect(w.panes.get(lane.pane!)!.ran[0]).toStartWith("omo --model");
     expect(lead.received[0]).toStartWith(`[START fix-login] lane opened in ${lane.pane}`);
     await expect(open("fix-login")).rejects.toThrow(Refusal);
@@ -37,7 +38,8 @@ describe("one lane registry", () => {
     const line = await report(d, "quiet", "repro found, fixing", "milestone");
     expect(line).toBe("[REPORT] quiet | milestone | repro found, fixing");
     expect(lead.received.at(-1)).toBe(line);
-    expect(await d.flow.registry.read("quiet")).toMatchObject({ lastReport: line, lastReplyAt: w.clock });
+    expect(new Reports(d.flow.config.stateDir).read("quiet")?.lastReport).toMatchObject({ kind: "milestone", text: "repro found, fixing", at: new Date(w.clock).toISOString() });
+    expect((await d.flow.registry.read("quiet"))?.lastReport).toBeUndefined();
     expect(w.panes.get(lane.pane!)!.screen).toBe("");
     w.clock += 25 * MIN;
     const events = await dutyTick(d);
@@ -100,8 +102,9 @@ describe("pane messaging", () => {
     const mux = new Proxy(d.mux, {
       get(t, k) {
         if (k === "deliver") return async (pane: string, text: string, st: Parameters<typeof t.deliver>[2]) => {
-          await t.deliver(pane, text, st);
+          const delivered = await t.deliver(pane, text, st);
           d.store.enqueue(pane, { at: w.clock, from: "a-lane", text: "late" });
+          return delivered;
         };
         const v = Reflect.get(t, k);
         return typeof v === "function" ? v.bind(t) : v;
@@ -173,7 +176,7 @@ describe("duty loop", () => {
     w.clock += 10 * MIN;
     statusMs = w.clock; // it reported with `hc send` and went idle; the registry never saw that report
     w.clock += 10 * MIN;
-    expect((await dutyTick(d, mem)).filter((e) => e.lane === "legacy")).toEqual([]);
+    expect((await dutyTick(d, mem)).filter((e) => e.lane === "legacy")).toEqual([{ lane: "legacy", action: "freshness no-report" }]);
     expect(pane.received).toEqual([]);
     w.clock += 6 * MIN;
     expect(await dutyTick(d, mem)).toContainEqual({ lane: "legacy", action: "freshness nudged" });
@@ -230,10 +233,10 @@ describe("dori up", () => {
     const loopPane = d.store.roles()["duty-loop"]!;
     expect(w.panes.get(dutyPane)!.ran[0]).toMatch(/^omo --append-system-prompt .*duty\.md'$/);
     expect(w.panes.get(loopPane)!.ran[0]).toBe("dori duty --interval 60");
-    expect(w.panes.size).toBe(before + 2);
+    expect(w.panes.size).toBe(before + 3);
 
     expect(await up(d, "/repo")).toEqual(["LEAD w1:p1 idle", `DUTY ${dutyPane} idle`, "LOOP alive, beat 0 s ago"]);
-    expect(w.panes.size).toBe(before + 2);
+    expect(w.panes.size).toBe(before + 3);
 
     lead.status = "idle";
     w.panes.delete("w1:p1");
@@ -305,6 +308,9 @@ describe("review + merge gate", () => {
     gh(w, [{ name: "test", bucket: "pass" }, { name: "docs", bucket: "skipping" }]);
     expect(await mergeGate(d, "o/r#7")).toBe(`MERGED o/r#7 head=${head}`);
     expect(w.calls.at(-1)!.argv).toContain("--match-head-commit");
+    expect(w.usage.filter((e) => e.name === "dori.merge_decided").map((e) => (e as { outcome: string }).outcome))
+      .toEqual(["no_receipt", "review_block", "no_checks", "checks_red", "checks_all_skipped", "merged"]);
+    expect(w.usage.filter((e) => e.name === "dori.review_completed")).toHaveLength(2);
   });
 
   test("a reviewer without a VERDICT line writes no receipt", async () => {

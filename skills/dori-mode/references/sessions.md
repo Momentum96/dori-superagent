@@ -10,7 +10,7 @@ dori launch fix-login --title "Fix the login redirect loop" \
   --thread "telegram:<chat>/<topic>" --model anthropic/claude-opus-5-5
 ```
 
-`launch` checks the key and the `Done =` line, appends a footer to the brief, opens a tab in `laneWorkspace`, starts the agent, and after 20 seconds checks the start: `STARTUP_ERROR` on a known failure (missing module, no API key, rate limit, quota), `STARTUP_OK` only when herdr reports the agent idle or working, `STARTUP_UNCONFIRMED` otherwise. On `STARTUP_ERROR`, relaunch on another model; on `STARTUP_UNCONFIRMED`, look at the pane before doing anything else.
+`launch` checks the key and the `Done =` line, appends a footer to the brief, opens a tab in `laneWorkspace`, starts the agent, and after 20 seconds checks the start: `STARTUP_ERROR` on a known failure (missing module, no API key, rate limit, quota), also when one shows on an idle agent during the goal wait, `STARTUP_OK` only when herdr reports the agent idle or working and it shows a goal (checked again every 10 seconds for up to 60 more seconds), `STARTUP_NO_GOAL` when it still shows no goal after that, `STARTUP_UNCONFIRMED` otherwise. On `STARTUP_ERROR`, relaunch on another model; on `STARTUP_NO_GOAL`, tell the lane to set its goal, since a lane without one stops after its first turn; on `STARTUP_UNCONFIRMED`, look at the pane before doing anything else.
 
 Write the brief like a careful prompt:
 
