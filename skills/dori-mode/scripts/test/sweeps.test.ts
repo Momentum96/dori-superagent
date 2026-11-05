@@ -1,13 +1,15 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
-import { mkdirSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { deadPaneTick, newDeadPaneState } from "../src/dead-panes.ts";
-import { freshnessTick } from "../src/freshness.ts";
+import { freshnessTick, lastReportLine } from "../src/freshness.ts";
 import { acquireSlot, releaseSlot } from "../src/heavy-slot.ts";
-import { guardTick } from "../src/host-guard.ts";
-import { adoptLane, launchLane, LaunchError } from "../src/launch.ts";
+import { guardTick, sampleHost } from "../src/host-guard.ts";
+import { adoptLane, cliCommand, footer, launchLane, LaunchError, shellQuote } from "../src/launch.ts";
 import type { Lane } from "../src/registry.ts";
+import type { Runner } from "../src/run.ts";
 import { resolveSession } from "../src/session-id.ts";
 import { depsFor, fakeClock, newWorld, sent, withState, type World } from "./fakes.ts";
 
@@ -26,6 +28,7 @@ const working: Lane = { key: "quiet-lane", title: "quiet", thread: "chat:team/9"
 test("a lane silent past the nudge time is nudged once, then its last report is posted for it", async () => {
   const deps = (ms: number) => depsFor(world, fakeClock(ms), state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
   await deps(T0).registry.write(working);
+  world.panes = [{ pane_id: "w:p7", workspace_id: "w", agent: "pi", agent_status: "idle" }];
   world.screen = "noise\n[REPORT] quiet-lane | milestone | tests green on /home/test/repo, PR open\n❯ ";
   expect(await freshnessTick(deps(T0 + 10 * MIN), "/home/test")).toEqual([]);
   expect((await freshnessTick(deps(T0 + 16 * MIN), "/home/test")).map((a) => a.kind)).toEqual(["nudged"]);
@@ -128,27 +131,106 @@ test("a quiet lane with no [REPORT] line logs NO-REPORT once, not on every tick"
   expect(await freshnessTick(deps(T0 + 31 * MIN), "/home/test")).toEqual([]);
 });
 
-test("launch reports STARTUP_OK only on a ready agent status; a blank pane is unconfirmed, a known failure is an error", async () => {
+test("launch reports STARTUP_OK only on a ready agent status that shows a goal; a blank pane is unconfirmed, a known failure is an error", async () => {
   const brief = join(state.dir, "brief.md");
-  const run = async (status: string | undefined, screen: string, key: string) => {
+  // A status list is returned one per lookup, the last one repeating.
+  let waits = 0;
+  const run = async (status: string | undefined | (string | undefined)[], screen: string | string[], key: string, patch: { goalMarker?: string } = {}) => {
+    const statuses = Array.isArray(status) ? [...status] : [status];
     writeFileSync(brief, "# brief\n");
     world = newWorld();
-    world.screen = screen;
-    const base = depsFor(world, fakeClock(T0), state.dir);
+    if (Array.isArray(screen)) world.screens = [...screen];
+    else world.screen = screen;
+    waits = 0;
+    const base = depsFor(world, { ...fakeClock(T0), sleep: async () => void waits++ }, state.dir, patch);
     const inner = base.run;
     const deps = { ...base, run: async (argv: readonly string[]) => {
       if (argv[0] === "herdr" && argv[1] === "tab" && argv[2] === "create") return { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w:p9" }, tab_id: "w:t9" } }), err: "" };
-      if (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "list") return { code: 0, out: JSON.stringify({ result: { panes: [{ pane_id: "w:p9", workspace_id: "w", ...(status ? { agent: "pi", agent_status: status } : {}) }] } }), err: "" };
+      if (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "list") {
+        const s = statuses.length > 1 ? statuses.shift() : statuses[0];
+        return { code: 0, out: JSON.stringify({ result: { panes: [{ pane_id: "w:p9", workspace_id: "w", ...(s ? { agent: "pi", agent_status: s } : {}) }] } }), err: "" };
+      }
       return inner(argv);
     } };
     return (await launchLane(deps, { key, title: "t", brief, done: "closed acme/app#3" })).startup;
   };
-  expect(await run("idle", "❯ ", "ok-lane")).toBe("STARTUP_OK ok-lane w:p9");
+  const goal = "❯ \n Pursuing goal (1m)";
+  expect(await run("idle", goal, "ok-lane")).toBe("STARTUP_OK ok-lane w:p9");
+  expect(await run("working", ["❯ ", "❯ ", "❯ ", goal], "slow-goal-lane")).toBe("STARTUP_OK slow-goal-lane w:p9");
+  expect(await run("idle", "❯ ", "no-goal-lane")).toStartWith("STARTUP_NO_GOAL no-goal-lane w:p9");
+  expect(await run("idle", ["❯ ", "❯ ", "usage limit reached\n❯ "], "limit-lane")).toBe("STARTUP_ERROR limit-lane w:p9: usage limit");
+  // A working agent has not failed: its own output may quote the failure phrases (here, while it reads launch.ts).
+  expect(await run("working", ["❯ ", "read launch.ts: /usage limit|rate limit|quota/\n❯ ", `read launch.ts: /usage limit|rate limit|quota/\n${goal}`], "quoting-lane")).toBe("STARTUP_OK quoting-lane w:p9");
+  expect(await run("idle", `grep: ui.js returns "Pursuing goal" while active\n${"output\n".repeat(4)}❯ \n model • 10K`, "quoted-goal-lane")).toStartWith("STARTUP_NO_GOAL quoted-goal-lane w:p9");
+  expect(await run(["idle", "done"], ["❯ ", goal], "stopped-lane")).toStartWith("STARTUP_UNCONFIRMED stopped-lane w:p9");
+  // The marker is config, since the agent is: another agent's goal line counts, and an empty marker turns the wait off.
+  expect(await run("idle", "❯ \n goal: ship the fix", "other-agent-lane", { goalMarker: "goal:" })).toBe("STARTUP_OK other-agent-lane w:p9");
+  expect(await run("idle", "❯ ", "no-marker-lane", { goalMarker: "" })).toBe("STARTUP_OK no-marker-lane w:p9");
+  expect(waits).toBe(1);
   expect(await run(undefined, "", "blank-lane")).toStartWith("STARTUP_UNCONFIRMED blank-lane w:p9");
   expect(await run(undefined, "Error: provider refused the key\n$ ", "worded-lane")).toStartWith("STARTUP_UNCONFIRMED worded-lane w:p9");
   expect(await run("idle", "No API key found\n❯ ", "err-lane")).toBe("STARTUP_ERROR err-lane w:p9: No API key");
   expect(await run("blocked", "❯ ", "blocked-lane")).toStartWith("STARTUP_UNCONFIRMED blocked-lane w:p9");
   expect(await run("done", "❯ ", "done-lane")).toStartWith("STARTUP_UNCONFIRMED done-lane w:p9");
+});
+
+test("STARTUP_NO_GOAL names the time the launch really waited, not the planned 80 s", async () => {
+  // Given a host where every sleep overruns by 5 s, and an agent that never shows a goal.
+  const brief = join(state.dir, "brief.md");
+  writeFileSync(brief, "# brief\n");
+  world.screen = "❯ ";
+  const clock = fakeClock(T0);
+  const base = depsFor(world, { ...clock, sleep: async (ms: number) => void (clock.at += ms + 5_000) }, state.dir);
+  const inner = base.run;
+  const deps = { ...base, run: async (argv: readonly string[]) => {
+    if (argv[0] === "herdr" && argv[1] === "tab" && argv[2] === "create") return { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w:p9" }, tab_id: "w:t9" } }), err: "" };
+    if (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "list") return { code: 0, out: JSON.stringify({ result: { panes: [{ pane_id: "w:p9", workspace_id: "w", agent: "pi", agent_status: "idle" }] } }), err: "" };
+    return inner(argv);
+  } };
+  // When the launch gives up on the goal; then the message gives the 20 s check plus six 10 s re-reads, each 5 s late.
+  const { startup } = await launchLane(deps, { key: "late-lane", title: "t", brief, done: "closed acme/app#3" });
+  expect(startup).toStartWith("STARTUP_NO_GOAL late-lane w:p9: the agent is running but shows no goal after 115 s;");
+});
+
+test("launch registers the lane before it starts the agent, so the lane's first dori report is accepted", async () => {
+  const brief = join(state.dir, "brief.md");
+  writeFileSync(brief, "# brief\n");
+  const base = depsFor(world, fakeClock(T0), state.dir);
+  let atStart: Lane | null | undefined;
+  const deps = { ...base, run: async (argv: readonly string[]) => {
+    if (argv[0] === "herdr" && argv[1] === "tab" && argv[2] === "create") return { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w:p9" }, tab_id: "w:t9" } }), err: "" };
+    if (argv[0] === "herdr" && argv[1] === "pane" && argv[2] === "run") atStart = await base.registry.read("fast-lane");
+    return base.run(argv);
+  } };
+  await launchLane(deps, { key: "fast-lane", title: "t", brief, done: "closed acme/app#3" });
+  expect(atStart?.pane).toBe("w:p9");
+});
+
+test("the harness launch record is not the lane's report: a silent launched lane is NO-REPORT, never posted", async () => {
+  const brief = join(state.dir, "brief.md");
+  writeFileSync(brief, "# brief\n");
+  world.screen = "Working (1m)\n❯ ";
+  const clock = fakeClock(T0);
+  const base = depsFor(world, clock, state.dir, { hooks: { threadReply: ["notify", "{thread}", "{text}"] } });
+  const deps = { ...base, run: async (argv: readonly string[]) => {
+    if (argv[0] === "herdr" && argv[1] === "tab" && argv[2] === "create") return { code: 0, out: JSON.stringify({ result: { root_pane: { pane_id: "w:p9" }, tab_id: "w:t9" } }), err: "" };
+    return base.run(argv);
+  } };
+  await launchLane(deps, { key: "new-lane", title: "t", brief, done: "closed acme/app#3", thread: "chat:team/9" });
+  clock.at = T0 + 21 * MIN;
+  expect((await freshnessTick(deps, "/home/test")).map((a) => a.kind)).toEqual(["nudged", "no-report"]);
+  expect(world.calls.some((c) => c[0] === "notify")).toBe(false);
+});
+
+test("the lane footer calls the skill CLI by its own path, never a bare dori that may be the root harness", async () => {
+  const text = footer({ ...working, key: "path-lane" }, "lead:p1");
+  const commands = [...text.matchAll(/bun (\S+) (report|claim-done) path-lane/g)];
+  expect(commands.map((m) => m[2])).toEqual(["report", "claim-done"]);
+  for (const [, cli] of commands) {
+    expect(cli).toEndWith("/skills/dori-mode/scripts/src/cli.ts");
+    expect(await Bun.file(cli ?? "").exists()).toBe(true);
+  }
+  expect(text).not.toMatch(/(^|\s)dori (report|claim-done)/);
 });
 
 test("the host guard alerts on low disk, clears when it recovers, and flips compute readiness on load", () => {
@@ -161,6 +243,29 @@ test("the host guard alerts on low disk, clears when it recovers, and flips comp
   const recovered = guardTick({ ...healthy, load1: 120 }, t, st);
   expect(recovered[0]).toStartWith("HOST_GUARD CLEAR");
   expect(recovered.slice(1)).toEqual(["HOST_GUARD COMPUTE_BUSY load 120"]);
+});
+
+const linuxHost = (meminfo: string | null): Runner => async (argv) => {
+  const [cmd] = argv;
+  if (cmd === "cat" && argv[1] === "/proc/meminfo") return meminfo === null ? { code: 1, out: "", err: "no such file" } : { code: 0, out: meminfo, err: "" };
+  if (cmd === "cat") return { code: 0, out: "0.50 0.40 0.30 1/200 999", err: "" };
+  if (cmd === "df") return { code: 0, out: "Filesystem 1K-blocks Used Available Use% Mounted\n/dev/x 1000 500 524288 50% /", err: "" };
+  return { code: 127, out: "", err: "not found" };
+};
+
+test("on Linux the host guard reports 0% free when MemAvailable is 0", async () => {
+  const s = await sampleHost(linuxHost("MemTotal:       16000000 kB\nMemFree:               0 kB\nMemAvailable:          0 kB\n"));
+  expect(s.memFreePct).toBe(0);
+});
+
+test("on Linux the host guard reads free memory from /proc/meminfo when memory_pressure is missing", async () => {
+  const s = await sampleHost(linuxHost("MemTotal:       16000000 kB\nMemFree:          200000 kB\nMemAvailable:    4000000 kB\n"));
+  expect(s.memFreePct).toBe(25);
+});
+
+test("the host guard keeps memory at 100% when neither memory_pressure nor /proc/meminfo works", async () => {
+  expect((await sampleHost(linuxHost(null))).memFreePct).toBe(100);
+  expect((await sampleHost(linuxHost("MemTotal:       16000000 kB\n"))).memFreePct).toBe(100);
 });
 
 test("a heavy slot waits for load to drop, and a slot held by a dead process is taken over", async () => {
@@ -213,4 +318,27 @@ test("the session id is read from --session, then a child's environment, then th
   const listDir = () => ["2026-01-01T09-00-00-000Z_01a10000-0000-7000-8000-000000000000.jsonl", "2026-01-01T12-00-02-113Z_01a11440-ee81-7f90-b2ed-dcc7d51a0adf.jsonl"];
   const byStart = await resolveSession("w:p1", "/repo", table, { run: fake({ "ps eww": "bun mcp X=1", "ps -o lstart=": "Thu Jan  1 12:00:01 2026 GMT" }), sessionsDir: "/s", listDir });
   expect(byStart).toEqual({ id: "01a11440-ee81-7f90-b2ed-dcc7d51a0adf", via: "start-time", pid: 11 });
+});
+
+test("a [REPORT] template with an unfilled placeholder is source, not a report: the last emitted report wins (#22)", () => {
+  const emitted = "[REPORT] demo-lane | milestone | checks passed";
+  const screen = [emitted, 'print(f"[REPORT] demo-lane | milestone | {message}")', 'echo "[REPORT] demo-lane | milestone | ${message}"'].join("\n");
+  expect(lastReportLine(screen, "demo-lane")).toBe(emitted);
+  expect(lastReportLine('echo "[REPORT] demo-lane | done | ${message}"', "demo-lane")).toBeNull();
+  expect(lastReportLine("[REPORT] demo-lane | done | PR #12 merged", "demo-lane")).toBe("[REPORT] demo-lane | done | PR #12 merged");
+  expect(lastReportLine("[REPORT] demo-lane | milestone | added getUser({id}) and ${HOME} docs", "demo-lane")).toBe("[REPORT] demo-lane | milestone | added getUser({id}) and ${HOME} docs");
+});
+
+test("the footer CLI command survives a skill path with a space or a quote", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "dori skill's dir "));
+  try {
+    const cli = join(dir, "cli.ts");
+    writeFileSync(cli, 'console.log("CLI_OK " + process.argv.slice(2).join(" "));\n');
+    expect(shellQuote("/plain/path/cli.ts")).toBe("/plain/path/cli.ts");
+    const command = cliCommand(cli);
+    const proc = Bun.spawn(["bash", "-c", `${command} report path-lane --kind milestone`], { stdout: "pipe", stderr: "pipe" });
+    expect((await new Response(proc.stdout).text()).trim()).toBe("CLI_OK report path-lane --kind milestone");
+    expect(await proc.exited).toBe(0);
+    expect(footer({ ...working, key: "path-lane" }, "lead:p1")).toContain(cliCommand());
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

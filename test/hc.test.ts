@@ -6,12 +6,12 @@ import { defaultConfig, loadConfig } from "../skills/dori-mode/scripts/src/confi
 import { hcRunner } from "../skills/dori-mode/scripts/src/hc-runner.ts";
 import { Registry } from "../skills/dori-mode/scripts/src/registry.ts";
 import { isSkillCommand } from "../src/cli.ts";
-import { done, dutyTick, send, startLane, up, type Deps } from "../src/harness.ts";
+import { done, dutyTick, send, sendToShell, startLane, up, type Deps } from "../src/harness.ts";
 import { Hc } from "../src/hc.ts";
 import type { Exec } from "../src/herdr.ts";
 import { Store } from "../src/store.ts";
 
-type Term = { state: "live" | "finished"; status: { app: string; state: string } | null; labels: Record<string, string>; received: string[] };
+type Term = { state: "live" | "finished"; status: { app: string; state: string } | null; foreground?: { name: string; argv: string[] }; labels: Record<string, string>; received: string[] };
 
 class HcWorld {
   terms = new Map<string, Term>();
@@ -37,13 +37,13 @@ class HcWorld {
     if (verb === "ls") return ok({ terminals: [...this.terms].filter(([, t]) => t.state === "live").map(([a, t]) => ({ address: a, ...(t.status ? { agent: t.status.app, status: t.status.state } : {}) })) });
     const t = this.terms.get(address);
     if (!t) return { code: 3, stdout: "", stderr: JSON.stringify({ error: { kind: "not_found", message: `no terminal ${address}` } }) };
-    if (verb === "get") return ok({ address, pid: 1, state: t.state, status: t.status, labels: t.labels });
+    if (verb === "get") return ok({ address, pid: 1, state: t.state, status: t.status, labels: t.labels, foreground: t.foreground ?? (t.status ? { name: "omo", argv: ["omo"] } : { name: "zsh", argv: ["zsh"] }) });
     if (verb === "send") {
       t.received.push(argv[2]!);
       if (!t.status && /^omo\b/.test(argv[2]!)) t.status = { app: "omo", state: "idle" };
       return ok({ started: true });
     }
-    if (verb === "read") return ok("");
+    if (verb === "read") return ok("Pursuing goal");
     if (verb === "kill") { t.state = "finished"; return ok(); }
     if (verb === "wait") return ok();
     if (verb === "rm") { this.terms.delete(address); return ok(); }
@@ -64,6 +64,8 @@ class HcWorld {
       now: () => 1_000_000,
       agentCmd: "omo",
       doriCmd: "dori",
+      host: () => ({ load1: 0, cores: 8, memFreePct: 50 }),
+      usage: { touch() {}, record() {}, duty() {}, async flush() {} },
       flow: { run, clock: { now: () => 1_000_000, sleep: async () => {} }, registry: new Registry(stateDir), config, exists: () => true },
     };
   }
@@ -111,6 +113,8 @@ describe("hc multiplexer", () => {
     const shell = w.add("t5", null);
     expect(await send(d, "t5", "rm -rf ~/work", "cli")).toBe("QUEUED");
     expect(await dutyTick(d)).not.toContainEqual({ pane: "t5", action: "flushed" });
+    await expect(sendToShell(d, "t5", "unsafe", "cli")).rejects.toThrow("not supported on hc");
+    expect(await d.mux.deliver("t5", "unsafe")).toBe(false);
     expect(shell.received).toEqual([]);
     expect(w.calls.some((c) => c[1] === "send" && c[2] === "t5")).toBe(false);
     shell.status = { app: "omo", state: "idle" };
@@ -129,15 +133,31 @@ describe("hc multiplexer", () => {
     expect(w.calls.filter((c) => c[2] === lane.pane && ["kill", "wait", "rm"].includes(c[1]!)).map((c) => c[1])).toEqual(["kill", "wait", "rm"]);
   });
 
-  test("dori up without a space opens exactly the duty and loop terminals, never a workspace shell or a second lead", async () => {
+  test("stale OSC idle with a shell foreground holds mail until the agent returns", async () => {
+    const w = new HcWorld();
+    const d = w.deps();
+    const pane = w.add("t8", "idle");
+    pane.foreground = { name: "zsh", argv: ["zsh", "-i"] };
+    expect(await send(d, "t8", "unsafe shell text", "cli")).toBe("QUEUED");
+    expect(pane.received).toEqual([]);
+    expect(d.store.queued("t8")).toHaveLength(1);
+    pane.foreground = { name: "omo", argv: ["omo"] };
+    expect(await dutyTick(d)).toContainEqual({ pane: "t8", action: "flushed" });
+    expect(pane.received).toEqual(["unsafe shell text"]);
+    expect(d.store.queued("t8")).toEqual([]);
+  });
+
+  test("dori up without a space opens exactly the duty and both loop terminals, never a workspace shell or a second lead", async () => {
     const w = new HcWorld();
     const d = w.deps();
     w.add("t3", "idle");
     const lines = await up(d, "/repo");
     expect(lines[0]).toBe("LEAD t3 idle");
     const runs = w.calls.filter((c) => c[1] === "run");
-    expect(runs).toHaveLength(2);
-    expect(runs.map((r) => r[r.indexOf("--name") + 1])).toEqual(["duty", "duty-loop"]);
+    expect(runs).toHaveLength(3);
+    expect(runs.map((r) => r[r.indexOf("--name") + 1])).toEqual(["duty", "hourly-loop", "duty-loop"]);
+    await up(d, "/repo");
+    expect(w.calls.filter((c) => c[1] === "run")).toHaveLength(3);
     expect(runs.flat().some((a) => a.startsWith("herdr.space=") || a.startsWith("dori.workspace="))).toBe(false);
   });
 
@@ -181,7 +201,7 @@ describe("one dori command", () => {
     const dir = mkdtempSync(join(tmpdir(), "dori-fwd-"));
     const config = join(dir, "config.json");
     writeFileSync(config, JSON.stringify({ mux: "hc", stateDir: join(dir, "state") }));
-    const env: Record<string, string | undefined> = { ...process.env, DORI_CONFIG: config, DORI_HOME: join(dir, "harness"), HC_TERMINAL_ID: "t999", HERDR_PANE_ID: "" };
+    const env: Record<string, string | undefined> = { ...process.env, DORI_CONFIG: config, DORI_HOME: join(dir, "harness"), DORI_TELEMETRY: "0", HC_TERMINAL_ID: "t999", HERDR_PANE_ID: "" };
     delete env["DORI_DISCORD_TOKEN"];
     delete env["DORI_MUX"];
     const cli = resolve(import.meta.dir, "../src/cli.ts");

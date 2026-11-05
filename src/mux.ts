@@ -13,7 +13,8 @@ export interface Mux {
   split(paneId: string, cwd: string, env?: Record<string, string>): Promise<PaneRef>;
   run(paneId: string, commandLine: string): Promise<void>;
   status(paneId: string): Promise<AgentStatus>;
-  deliver(paneId: string, text: string, kind: AgentStatus): Promise<void>;
+  deliver(paneId: string, text: string, kind?: AgentStatus): Promise<boolean>;
+  typeIntoShell(paneId: string, text: string): Promise<boolean>;
   read(paneId: string, lines?: number): Promise<string>;
   close(paneId: string): Promise<void>;
   ownPane(): string | undefined;

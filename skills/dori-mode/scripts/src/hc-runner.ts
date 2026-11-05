@@ -1,4 +1,5 @@
 import type { Ran, Runner } from "./run.ts";
+import { ALIVE_STATUSES, shellInFront } from "./panes.ts";
 
 // Runs dori on herdr-core (`hc`) by translating the herdr argv the scripts emit into hc commands
 // and shaping hc's JSON back into herdr's. Workspaces map to Herdr app space ids (`herdr.space`
@@ -11,7 +12,7 @@ type HcDetail = {
   readonly title?: string | null;
   readonly name?: string | null;
   readonly labels?: Readonly<Record<string, string>>;
-  readonly foreground?: { readonly name?: string } | null;
+  readonly foreground?: { readonly name?: string; readonly argv?: readonly string[] } | null;
 };
 
 const SHELL = /^-?(zsh|bash|sh|fish|dash|nu)$/;
@@ -72,7 +73,7 @@ export const hcRunner = (run: Runner, hc = "hc"): Runner => {
     return ok(JSON.stringify({ result: { root_pane: { pane_id: address } } }));
   };
 
-  return async (argv, opts) => {
+  const adapted: Runner = async (argv, opts) => {
     if (argv[0] !== "herdr") return run(argv, opts);
     const [, noun, verb, target = ""] = argv;
     const key = `${noun} ${verb}`;
@@ -90,7 +91,8 @@ export const hcRunner = (run: Runner, hc = "hc"): Runner => {
         const got = await run([hc, "get", target, "--json"]);
         if (got.code !== 0) return got;
         const st = (JSON.parse(got.out) as HcDetail).status;
-        if (!st?.app && !st?.state) return fail(`hc terminal ${target} runs no agent; text not typed`);
+        if (!st?.state || !ALIVE_STATUSES.has(st.state)) return fail(`hc terminal ${target} runs no agent; text not typed`);
+        if (await shellInFront(adapted, target)) return fail(`hc terminal ${target} has a shell or unknown foreground; text not typed`);
         const r = await run([hc, "send", target, argv[4] ?? ""]);
         if (r.code === 0) enterOwed = target;
         return r;
@@ -118,7 +120,10 @@ export const hcRunner = (run: Runner, hc = "hc"): Runner => {
         const r = await run([hc, "get", pane, "--json"]);
         if (r.code !== 0) return r;
         const d = JSON.parse(r.out) as HcDetail;
-        return ok(JSON.stringify({ result: { process_info: { shell_pid: d.pid ?? 0 } } }));
+        return ok(JSON.stringify({ result: { process_info: {
+          shell_pid: d.pid ?? 0,
+          foreground_processes: d.foreground?.name ? [d.foreground] : [],
+        } } }));
       }
       case "tab create":
         return createTab(argv);
@@ -126,4 +131,5 @@ export const hcRunner = (run: Runner, hc = "hc"): Runner => {
         return fail(`hc backend has no equivalent for: ${argv.join(" ")}`);
     }
   };
+  return adapted;
 };

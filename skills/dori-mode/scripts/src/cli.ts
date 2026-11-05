@@ -1,22 +1,27 @@
 #!/usr/bin/env bun
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
-import { loadConfig } from "./config.ts";
+import { bootCheck, slackAuthCheck } from "./boot.ts";
+import { ConfigError, loadConfig } from "./config.ts";
 import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
 import { claimDone, closeLane, type FlowDeps, objectDone, watchTick } from "./done-flow.ts";
 import { freshnessTick } from "./freshness.ts";
 import { acquireSlot, pidAlive, releaseSlot } from "./heavy-slot.ts";
 import { guardTick, sampleHost } from "./host-guard.ts";
-import { hcRunner } from "./hc-runner.ts";
-import { adoptLane, launchLane, LaunchError } from "./launch.ts";
+import { adoptLane, launchLane, LaunchError, type LaunchInput, prepareLaunch } from "./launch.ts";
+import { isLessonOutcome, LessonError, Lessons } from "./lessons.ts";
 import { pauseLane, resumeLane } from "./pause.ts";
 import { Registry, statusOf } from "./registry.ts";
+import { isReportKind, reportLine, ReportError, Reports } from "./reports.ts";
 import { realClock, run as spawnRun } from "./run.ts";
+import { hcRunner } from "./hc-runner.ts";
 import { syncRegistry } from "./sync.ts";
 import { canLaunch } from "./routing.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
 import { pollSlackInbound } from "./messenger/slack-inbound.ts";
+import { envInt, fileTgInboundStore, telegramInboundLoop } from "./messenger/telegram-inbound.ts";
 import { ThreadLedger } from "./messenger/thread-ledger.ts";
 import { slackPresence } from "./messenger/slack-presence.ts";
 import { Telegram } from "./messenger/telegram.ts";
@@ -24,15 +29,35 @@ import { Discord, discordPresence } from "./messenger/discord.ts";
 import { DiscordGatewayListener, DiscordInbound, discordInboundTransport, loadInboundState, saveInboundState, watchDiscordInbound } from "./messenger/discord-inbound.ts";
 import { realTimers } from "./messenger/typing.ts";
 import { transcribe, TranscriptionError } from "./messenger/voice.ts";
+import { formatVerifyPr, verifyPr } from "./verify-pr.ts";
+import { CheckpointError, Checkpoints } from "./checkpoints.ts";
+import { Worklog, WorklogError } from "./worklog.ts";
 
 const USAGE = `dori <command> [options]
 
   launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" [--thread REF] [--model M] [--cwd DIR]
+         [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none] [--activity-path FILE ...] [--dry-run]
   adopt  <key> --pane ID --title T --brief FILE --done "..." [--thread REF]
   sync   [--write]                     registry vs live panes; read-only unless --write
-  claim-done [<key>] --evidence TEXT  key defaults to the lane registered for $HERDR_PANE_ID ($HC_TERMINAL_ID with mux hc)
+  boot                                 read-only check after a restart: Slack auth, vanished panes, journals, open worklog items, stale watches
+  report <key> --kind milestone|blocker|question|halted|done --text TEXT
+                                       append a durable progress report and print its [REPORT] line
+  checkpoint <key> --step ID --result TEXT --evidence PATH [--remote-effect RECEIPT]...
+                                       record a completed step once; a conflicting rewrite is refused
+  checkpoints <key>                    read completed steps before resuming remote work
+  verify-pr <owner/repo> <num> [--loop N] [--cwd DIR]
+                                       check every commit's author/committer email and PR-level tests; print the UI test loop (not run)
+  claim-done [<key>] --evidence TEXT  key defaults to the lane registered for $HERDR_PANE_ID
   object-done <key> --reason TEXT [--reason TEXT ...]
-  close  <key> [--note TEXT]           close now (Done signals must read back live)
+  lesson add <key> --rule TEXT --evidence PATH [--cwd DIR]
+  lesson list [--cwd DIR]             show current lessons, newest first
+  lesson mark <id> --outcome pending|helped|no-effect|harmful|encoded
+  worklog add <title> --source REF     record an owner request when it arrives
+  worklog next|note <id> <text>        set the item's next step, or add a note (a decision, an owner)
+  worklog close <id> --result TEXT     close the item with what came of it
+  worklog list [--open]                items as JSON; <stateDir>/worklog.md holds the same for reading
+  close  <key> [--note TEXT] [--lesson TEXT] [--evidence PATH]
+                                       close now (Done signals must read back live); an optional lesson never blocks it
   pause  <key> [--note TEXT]           the owner said wait: goal paused (read back), running turn stopped, no nudges; exit 3 if unconfirmed
   resume <key> [--note TEXT]           undo pause: goal resumed (read back), lane back to its earlier status
   watch                                long-running: emits LANE_* lines every 30 s
@@ -45,22 +70,22 @@ const USAGE = `dori <command> [options]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
   presence <slack|discord>             keep the account shown as online until stopped
   transcribe <audio-file>              run hooks.transcribe and print the text
-  inbound slack [--loop MIN]           print INBOUND lines: unread thread replies (threads view), replies in threads
+  inbound slack|telegram [--loop MIN]  print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
                                        the Dori posted in (any helper), DMs and channels with unread mentions
-  inbound discord --channel ID --owner ID [--state FILE]
-                                       long-running: print a DORI_INBOUND JSON line per owner message in the channel
-                                       and its threads (token from DORI_DISCORD_TOKEN)`;
+  inbound discord --channel ID --owner ID [--state FILE]  watch owner messages and threads`;
 
-const die = (message: string, code = 1): never => {
-  console.error(message);
-  process.exit(code);
-};
+class CliExit extends Error {
+  constructor(message: string, readonly code: number) { super(message); }
+}
+const die = (message: string, code = 1): never => { throw new CliExit(message, code); };
 
-const config = await loadConfig();
+export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<number> {
+try {
+const config = await loadConfig().catch((e: unknown) => (e instanceof ConfigError ? die(e.message) : Promise.reject(e)));
 const run = config.mux === "hc" ? hcRunner(spawnRun) : spawnRun;
 const ownPane = (config.mux === "hc" ? process.env.HC_TERMINAL_ID : process.env.HERDR_PANE_ID) ?? "";
 const deps: FlowDeps = { run, clock: realClock, registry: new Registry(config.stateDir), config };
-const [command = "", ...rest] = process.argv.slice(2);
+const [command = "", ...rest] = argv;
 
 const flags = parseArgs({
   args: rest,
@@ -70,7 +95,12 @@ const flags = parseArgs({
     title: { type: "string" }, brief: { type: "string" }, done: { type: "string" }, thread: { type: "string" },
     model: { type: "string" }, cwd: { type: "string" }, pane: { type: "string" }, evidence: { type: "string" },
     reason: { type: "string", multiple: true }, note: { type: "string" }, write: { type: "boolean" }, loop: { type: "string" },
-    to: { type: "string" }, text: { type: "string" }, edit: { type: "string" },
+    to: { type: "string" }, text: { type: "string" }, edit: { type: "string" }, kind: { type: "string" },
+    step: { type: "string" }, result: { type: "string" }, "remote-effect": { type: "string", multiple: true },
+    "wall-minutes": { type: "string" }, "token-limit": { type: "string" }, "cost-limit": { type: "string" },
+    "activity-path": { type: "string", multiple: true },
+    rule: { type: "string" }, outcome: { type: "string" }, lesson: { type: "string" }, "dry-run": { type: "boolean" },
+    source: { type: "string" }, open: { type: "boolean" },
     channel: { type: "string" }, owner: { type: "string" }, state: { type: "string" },
   },
 });
@@ -81,6 +111,17 @@ const opt = (name: string): string | undefined => {
 const need = (name: string): string => opt(name) || die(`--${name} is required`);
 const key = flags.positionals[0];
 const loopMin = Number(opt("loop") ?? 0);
+const strings = (name: string): string[] => {
+  const value = flags.values[name];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+};
+const ceiling = (name: string): number | null | undefined => {
+  const value = opt(name);
+  if (value === undefined) return undefined;
+  if (value === "none") return null;
+  const parsed = Number(value);
+  return value && Number.isFinite(parsed) && parsed >= 0 ? parsed : die(`--${name} must be a nonnegative number or none`);
+};
 
 const lane = async (k: string | undefined) => {
   const found = k ? await deps.registry.read(k) : await deps.registry.byPane(ownPane);
@@ -99,11 +140,32 @@ const every = async (minutes: number, tick: () => Promise<void>): Promise<void> 
 
 try {
   switch (command) {
+    case "report": {
+      const target = await lane(key ?? die("report needs a lane key"));
+      const kind = need("kind");
+      if (isReportKind(kind)) {
+        console.log(reportLine(new Reports(config.stateDir).report(target.key, kind, need("text"), realClock.now())));
+      } else die("--kind must be milestone, blocker, question, halted or done");
+      break;
+    }
     case "launch": {
-      const r = await launchLane(deps, { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: opt("thread"), model: opt("model"), cwd: opt("cwd") });
+      const wallMinutes = ceiling("wall-minutes"), tokens = ceiling("token-limit"), costUsd = ceiling("cost-limit");
+      const input: LaunchInput = {
+        key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: opt("thread"), model: opt("model"), cwd: opt("cwd"),
+        budget: { ...(wallMinutes !== undefined ? { wallMinutes } : {}), ...(tokens !== undefined ? { tokens } : {}), ...(costUsd !== undefined ? { costUsd } : {}) },
+        activityPaths: strings("activity-path"),
+      };
+      if (flags.values["dry-run"]) {
+        const prepared = await prepareLaunch(deps, input);
+        for (const warning of prepared.warnings) console.error(warning);
+        console.log(prepared.preamble);
+        break;
+      }
+      const r = await launchLane(deps, input);
+      for (const warning of r.warnings) console.error(warning);
       console.log(`LAUNCHED ${r.lane.key} pane=${r.lane.pane} tab=${r.lane.tab ?? "?"}`);
       console.log(r.startup);
-      process.exit(r.startup.startsWith("STARTUP_OK") ? 0 : 3);
+      return r.startup.startsWith("STARTUP_OK") ? 0 : 3;
     }
     case "adopt": {
       const l = await adoptLane(deps, { key: key ?? "", title: need("title"), brief: need("brief"), done: need("done"), thread: opt("thread"), pane: need("pane") });
@@ -118,6 +180,105 @@ try {
       console.log(flags.values.write ? "WROTE session ids" : "READ_ONLY");
       break;
     }
+    case "boot": {
+      const token = process.env.DORI_SLACK_TOKEN;
+      const slack = token ? new Slack(fetchHttp, realClock, { token, cookie: process.env.DORI_SLACK_COOKIE }) : null;
+      const sessionDirs = [process.env.PI_SESSION_DIR, process.env.PI_SESSION_FILE && dirname(process.env.PI_SESSION_FILE)];
+      const r = await bootCheck({
+        ...deps,
+        reports: new Reports(config.stateDir),
+        worklog: new Worklog(config.stateDir),
+        slack: slackAuthCheck(slack),
+        monitorDirs: sessionDirs.flatMap((dir) => (dir ? [join(dir, "extensions", "terminal")] : [])),
+      });
+      for (const line of r.lines) console.log(line);
+      return r.exitCode;
+    }
+    case "lesson": {
+      const lessons = new Lessons(config.stateDir);
+      switch (key) {
+        case "add": {
+          const laneKey = flags.positionals[1] ?? die("lesson add needs a lane key");
+          const target = await deps.registry.read(laneKey) ?? die(`no registered lane "${laneKey}"`);
+          console.log(JSON.stringify(lessons.add({
+            lane: laneKey, cwd: opt("cwd") ?? target.cwd ?? config.defaultCwd,
+            rule: need("rule"), evidence: need("evidence"),
+          }, realClock.now())));
+          break;
+        }
+        case "list": {
+          const read = lessons.read(opt("cwd"));
+          for (const problem of read.problems) console.error(`LESSON_WARNING ${problem}`);
+          console.log(JSON.stringify(read.lessons, null, 2));
+          break;
+        }
+        case "mark": {
+          const id = flags.positionals[1] ?? die("lesson mark needs a lesson id");
+          const outcome = need("outcome");
+          if (isLessonOutcome(outcome)) console.log(JSON.stringify(lessons.mark(id, outcome)));
+          else die("--outcome must be pending, helped, no-effect, harmful or encoded");
+          break;
+        }
+        default:
+          die("lesson needs add, list or mark");
+      }
+      break;
+    }
+    case "worklog": {
+      const worklog = new Worklog(config.stateDir);
+      const id = () => flags.positionals[1] ?? die(`worklog ${key} needs an item id`);
+      const text = () => flags.positionals.slice(2).join(" ").trim() || die(`worklog ${key} needs text`);
+      const now = realClock.now();
+      switch (key) {
+        case "add":
+          console.log(JSON.stringify(worklog.add(flags.positionals.slice(1).join(" ").trim() || die("worklog add needs a title"), need("source"), now)));
+          break;
+        case "next":
+          console.log(JSON.stringify(worklog.next(id(), text(), now)));
+          break;
+        case "note":
+          console.log(JSON.stringify(worklog.note(id(), text(), now)));
+          break;
+        case "close":
+          console.log(JSON.stringify(worklog.close(id(), need("result"), now)));
+          break;
+        case "list": {
+          const read = worklog.read();
+          for (const problem of [...read.problems, ...read.warnings]) console.error(`WORKLOG_WARNING ${problem}`);
+          console.log(JSON.stringify(flags.values.open ? read.items.filter((item) => item.closedAt === undefined) : read.items, null, 2));
+          break;
+        }
+        default:
+          die("worklog needs add, next, note, close or list");
+      }
+      break;
+    }
+    case "checkpoint": {
+      const target = await lane(key ?? die("checkpoint needs a lane key"));
+      // parseArgs takes one value per flag; a second bare receipt would otherwise be dropped and its effect repeated later.
+      const stray = flags.positionals.slice(1);
+      if (stray.length) die(`checkpoint: unexpected argument ${stray[0]}; give each receipt its own --remote-effect`);
+      const result = new Checkpoints(config.stateDir).write(target.key, {
+        step: need("step"), result: need("result"), evidence: [need("evidence")], remoteEffects: strings("remote-effect"),
+      }, realClock.now());
+      console.log(JSON.stringify(result));
+      break;
+    }
+    case "checkpoints": {
+      if (!key || !(await deps.registry.read(key))) die("checkpoints needs a registered lane key");
+      console.log(JSON.stringify(new Checkpoints(config.stateDir).read(key ?? ""), null, 2));
+      break;
+    }
+    case "verify-pr": {
+      const repo = key ?? die("verify-pr needs owner/repo and a PR number");
+      const result = await verifyPr(repo, Number(flags.positionals[1]), run, {
+        expectedIdentity: config.repoIdentities[repo.toLowerCase()],
+        loopCount: Number(opt("loop") ?? 20),
+        cwd: opt("cwd"),
+      });
+      console.log(formatVerifyPr(result));
+      return result.ok ? 0 : 2;
+    }
     case "claim-done":
       console.log(await claimDone(deps, await lane(key), need("evidence")));
       break;
@@ -128,16 +289,19 @@ try {
       break;
     }
     case "close": {
-      const r = await closeLane(deps, await lane(key ?? die("close needs a lane key")), opt("note") ?? "closed by the lead");
+      const target = await lane(key ?? die("close needs a lane key"));
+      const rule = opt("lesson");
+      const r = await closeLane(deps, target, opt("note") ?? "closed by the lead",
+        rule === undefined ? undefined : { rule, evidence: opt("evidence") ?? target.done });
       for (const line of r.lines) console.log(line);
-      process.exit(r.closed ? 0 : 2);
+      return r.closed ? 0 : 2;
     }
     case "pause":
     case "resume": {
       const act = command === "pause" ? pauseLane : resumeLane;
       const r = await act(deps, await lane(key ?? die(`${command} needs a lane key`)), opt("note") ?? `${command}d by the lead`);
       for (const line of r.lines) console.log(line);
-      process.exit(r.code);
+      return r.code;
     }
     case "watch":
       console.log("LANE_WATCH_READY");
@@ -175,7 +339,7 @@ try {
       const slot = await acquireSlot({ dir: `${config.stateDir}/heavy`, slots: config.heavySlots, maxLoad: config.heavyMaxLoad, clock: realClock, load, alive: pidAlive, pid: process.pid }, label ?? "");
       try {
         const child = Bun.spawn(cmd, { stdout: "inherit", stderr: "inherit", stdin: "inherit" });
-        process.exitCode = await child.exited;
+        return await child.exited;
       } finally {
         releaseSlot(slot);
       }
@@ -184,7 +348,7 @@ try {
     case "can-launch": {
       const v = canLaunch(await sampleHost(run, "/", config.mux), config.guard);
       console.log(v.ok ? "CAN_LAUNCH" : `HOLD ${v.reasons.join(" | ")}`);
-      process.exit(v.ok ? 0 : 4);
+      return v.ok ? 0 : 4;
     }
     case "send": {
       const platform = key ?? die("send needs slack, telegram or discord");
@@ -262,7 +426,36 @@ try {
         }
         break;
       }
-      if (key !== "slack") die("inbound supports slack or discord");
+      if (key === "telegram") {
+        const tg = new Telegram(fetchHttp, realClock, process.env.DORI_TELEGRAM_TOKEN ?? die("DORI_TELEGRAM_TOKEN is not set"));
+        const store = fileTgInboundStore(`${config.stateDir}/telegram-offset`);
+        const num = (name: string): number => {
+          try {
+            return envInt(name, process.env[name]);
+          } catch (e) {
+            return die(e instanceof Error ? e.message : String(e));
+          }
+        };
+        const ownerId = num("DORI_TELEGRAM_OWNER_ID");
+        const groupChatId = process.env.DORI_TELEGRAM_GROUP_ID === undefined ? undefined : num("DORI_TELEGRAM_GROUP_ID");
+        const topicId = process.env.DORI_TELEGRAM_TOPIC_ID === undefined ? undefined : num("DORI_TELEGRAM_TOPIC_ID");
+        console.log(`INBOUND_READY telegram owner=${ownerId} group=${groupChatId ?? "-"} topic=${topicId ?? "-"}`);
+        // Full text, JSON-escaped on one line: getUpdates cannot fetch a message twice.
+        await telegramInboundLoop(
+          tg,
+          store,
+          { ownerId, groupChatId, topicId },
+          loopMin,
+          (i) =>
+            console.log(
+              `INBOUND ${i.kind === "edit" ? "edit:" : ""}${i.source} ${i.chat} ${i.thread ?? "-"} ${i.updateId} ${i.from} ${JSON.stringify(i.text ?? "")}` +
+                (i.media === undefined ? "" : ` file=${i.media.kind}:${i.media.fileId}`),
+            ),
+          (m) => console.log(`WARN ${m}`.slice(0, 300)),
+        );
+        break;
+      }
+      if (key !== "slack") die("inbound supports slack, telegram or discord");
       const auth = { token: process.env.DORI_SLACK_TOKEN ?? die("DORI_SLACK_TOKEN is not set"), cookie: process.env.DORI_SLACK_COOKIE };
       const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
       const slack = new Slack(fetchHttp, realClock, auth, undefined, ledger);
@@ -278,9 +471,18 @@ try {
       break;
     default:
       console.log(USAGE);
-      process.exit(command ? 1 : 0);
+      return command ? 1 : 0;
   }
 } catch (e) {
-  if (e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError) die(e.message);
+  if (e instanceof LaunchError || e instanceof UnsafeMessageError || e instanceof MessengerError || e instanceof TranscriptionError || e instanceof ReportError || e instanceof CheckpointError || e instanceof LessonError || e instanceof WorklogError) die(e.message);
   throw e;
 }
+return 0;
+} catch (error) {
+  if (!(error instanceof CliExit)) throw error;
+  console.error(error.message);
+  return error.code;
+}
+}
+
+if (import.meta.main) process.exitCode = await main();

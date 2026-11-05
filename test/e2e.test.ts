@@ -1,75 +1,61 @@
-import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { shq, spawnExec } from "../src/herdr.ts";
+import { expect, test } from "bun:test";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { main } from "../src/cli.ts";
+import { World } from "./fake.ts";
 
-// Real herdr, isolated named session, fake agent instead of a model: proves the pane plumbing end to end.
-const herdrBin = Bun.which("herdr");
-const session = `dori-e2e-${process.pid}`;
-const home = mkdtempSync(join(tmpdir(), "dori-e2e-"));
-const cli = resolve(import.meta.dir, "../src/cli.ts");
-const config = join(home, "config.json");
-const env = { ...process.env, DORI_HOME: home, DORI_HERDR_SESSION: session, DORI_MUX: "herdr", DORI_CONFIG: config };
-let server: ReturnType<typeof Bun.spawn> | undefined;
-
-const herdr = async (...argv: string[]) => {
-  const r = await spawnExec("herdr", ["--session", session, ...argv]);
-  if (r.code !== 0) throw new Error(r.stderr || r.stdout);
-  return JSON.parse(r.stdout || "{}").result;
-};
-const dori = async (...argv: string[]) => {
-  const p = Bun.spawn(["bun", cli, ...argv], { env, stdout: "pipe", stderr: "pipe" });
-  const [out, err, code] = await Promise.all([new Response(p.stdout).text(), new Response(p.stderr).text(), p.exited]);
-  if (code !== 0) throw new Error(`dori ${argv.join(" ")} -> ${code}: ${err}`);
-  return out;
-};
-const until = async <T>(what: string, probe: () => Promise<T | undefined>, ms = 20_000): Promise<T> => {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    const v = await probe().catch(() => undefined);
-    if (v !== undefined) return v;
-    await Bun.sleep(100);
-  }
-  throw new Error(`timed out waiting for ${what}`);
-};
-
-beforeAll(async () => {
-  if (!herdrBin) return;
-  server = Bun.spawn([herdrBin, "--session", session, "server"], { stdout: "ignore", stderr: "ignore" });
-  await until("herdr server", () => herdr("workspace", "list"));
-});
-
-afterAll(async () => {
-  if (!herdrBin) return;
-  await spawnExec("herdr", ["--session", session, "server", "stop"]);
-  await server?.exited;
-  await spawnExec("herdr", ["session", "delete", session]);
-});
-
-test.skipIf(!herdrBin)("a lane started in real herdr reports and claims done, and the lead pane receives both", async () => {
-  const ws = await herdr("workspace", "create", "--label", "e2e", "--cwd", home, "--no-focus");
-  const lead = ws.root_pane.pane_id as string;
-  await herdr("pane", "run", lead, "cat");
-  await dori("role", "lead", lead);
-  const brief = join(home, "brief.md");
+// CLI scenarios use only the injectable fake transport: no installed mux or production configuration.
+function setup() {
+  const w = new World();
+  const d = w.deps();
+  const lead = w.addPane("w1:p1", "shell");
+  d.store.setRole("lead", "w1:p1");
+  const brief = join(d.store.root, "brief.md");
   writeFileSync(brief, "E2E-BRIEF say hello\n");
+  const cli = async (...argv: string[]) => {
+    const lines: string[] = [];
+    const original = console.log;
+    console.log = (...args: unknown[]) => { lines.push(args.join(" ")); };
+    try { expect(await main(argv, d)).toBe(0); } finally { console.log = original; }
+    return lines.join("\n");
+  };
+  return { w, d, lead, brief, cli };
+}
 
-  const fake = resolve(import.meta.dir, "fixtures/fake-agent.sh");
-  const doriCmd = `DORI_HOME=${shq(home)} DORI_HERDR_SESSION=${session} DORI_MUX=herdr DORI_CONFIG=${shq(config)} bun ${shq(cli)}`;
-  writeFileSync(config, JSON.stringify({
-    mux: "herdr", stateDir: join(home, "state"), defaultCwd: home, laneWorkspace: ws.workspace.workspace_id,
-    agentCommand: ["env", `DORI_E2E_CMD=${doriCmd}`, fake, "{prompt}"],
-  }));
-  expect(await dori("start", "e2e-lane", "--brief", brief, "--done", `file ${brief}`)).toContain("STARTED e2e-lane");
+test("a CLI lane reports and claims done; a lead with no agent retains both until it returns", async () => {
+  const { d, lead, brief, cli } = setup();
+  expect(await cli("start", "e2e-lane", "--brief", brief, "--done", `file ${brief}`)).toContain("STARTED e2e-lane");
+  await cli("report", "e2e-lane", "--text", "read brief: E2E-BRIEF say hello");
+  await cli("ready", "e2e-lane", "--text", "e2e lane finished", "--evidence", brief);
+  expect(lead.received).toEqual([]);
+  const mail = d.store.queued("w1:p1").map((m) => m.text).join("\n");
+  expect(mail).toContain("[START e2e-lane]");
+  expect(mail).toContain("[REPORT] e2e-lane | milestone | read brief: E2E-BRIEF say hello");
+  expect(mail).toContain("[READY e2e-lane] e2e lane finished");
+  expect(await cli("status")).toMatch(/e2e-lane\s+done-claimed/);
+  lead.status = "idle";
+  await cli("duty", "--once");
+  expect(lead.received).toHaveLength(1);
+  expect(lead.received[0]).toContain("[READY e2e-lane]");
+  expect(d.store.queued("w1:p1")).toEqual([]);
+  expect(await cli("done", "e2e-lane")).toContain("CLOSED e2e-lane");
+});
 
-  const leadText = await until("READY in the lead pane", async () => {
-    const r = await spawnExec("herdr", ["--session", session, "pane", "read", lead, "--lines", "60", "--source", "recent"]);
-    return r.stdout.includes("[READY e2e-lane]") ? r.stdout : undefined;
-  });
-  expect(leadText).toContain("[START e2e-lane]");
-  expect(leadText).toContain("[REPORT] e2e-lane | milestone | read brief: E2E-BRIEF say hello");
-  expect(leadText).toContain("[READY e2e-lane] e2e lane finished");
-  expect(await dori("status")).toMatch(/e2e-lane\s+done-claimed/);
-  expect(await dori("done", "e2e-lane")).toContain("CLOSED e2e-lane");
-}, 90_000);
+test("the CLI hourly loop starts a backlog lane, reports the run and honors its stop switch", async () => {
+  const { d, lead, brief, cli } = setup();
+  expect(await cli("backlog", "add", "loop-item", "--brief", brief, "--done", `file ${brief}`, "--priority", "2")).toContain("ADDED loop-item p2");
+  expect(await cli("loop", "--once", "--max-lanes", "5")).toContain("LOOP started=1");
+  await cli("report", "loop-item", "--text", "read brief");
+  await cli("ready", "loop-item", "--text", "finished", "--evidence", brief);
+  const mail = d.store.queued("w1:p1").map((m) => m.text).join("\n");
+  expect(lead.received).toEqual([]);
+  expect(mail).toContain("[START loop-item]");
+  expect(mail).toContain("[READY loop-item]");
+  expect(mail).toContain("[LOOP ");
+  expect(mail).toContain("started: loop-item (p2)");
+  expect(await cli("backlog", "list")).toMatch(/loop-item\s+running/);
+  expect(await cli("loop", "status")).toContain("started: loop-item (p2)");
+  expect(await cli("loop", "stop", "--text", "e2e pause")).toContain("LOOP STOPPED");
+  expect(await cli("loop", "--once")).toContain("LOOP skipped: stopped: e2e pause");
+  expect(await cli("done", "loop-item")).toContain("CLOSED loop-item");
+});

@@ -1,7 +1,16 @@
 import { mkdirSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
+import type { BudgetLimits } from "./supervision.ts";
 
 export const LANE_KEY = /^[a-z0-9][a-z0-9._-]{1,60}$/;
+/**
+ * `lead` names the lead, never a lane: records the lead writes (lessons with `lane: "lead"`) and lead-only checks tell
+ * the two apart by this key, so launch and adopt refuse it. LANE_KEY stays as it is because those records still carry it,
+ * and keys are lowercase-only, so the exact match is the whole check.
+ */
+export const RESERVED_LANE_KEY = "lead";
+/** The root CLI and Dori mode share a registry, so every harness role is reserved on both launch paths. */
+export const RESERVED_LANE_KEYS: readonly string[] = [RESERVED_LANE_KEY, "duty", "duty-loop", "hourly-loop"];
 
 export type LaneStatus = "working" | "paused" | "done-claimed" | "verified-done" | "not-done" | "closed";
 export type Claim = { readonly at: string; readonly evidence: string; readonly emitted?: boolean };
@@ -30,7 +39,7 @@ export type Lane = {
   readonly lastReplyAt?: number;
   readonly lastNudgeAt?: number;
   readonly lastAutoReplyAt?: number;
-  /** The lane's last [REPORT] line as recorded by `dori report`; freshness reads this before the screen. */
+  /** Legacy report snapshot, read only when no journal exists. New reports append to Reports. */
   readonly lastReport?: string;
   /** The [REPORT] line the freshness sweep last posted, so a stale screen is never posted twice. */
   readonly lastPostedReport?: string;
@@ -46,6 +55,11 @@ export type Lane = {
   readonly lostReportedAt?: string;
   /** When the duty loop escalated a nudge the lane never answered, so each nudge escalates once. */
   readonly escalatedAt?: number;
+  readonly reportProtocol?: "jsonl-v1";
+  readonly budget?: BudgetLimits;
+  readonly activityPaths?: readonly string[];
+  /** The last supervision failure printed by `freshness`, so the same one is printed once. */
+  readonly lastSupervisionError?: string;
   readonly receipt?: unknown;
 };
 
@@ -81,18 +95,47 @@ export class Registry {
     renameSync(tmp, this.path(lane.key));
   }
 
+  // Reading never creates the lanes directory (dori boot is read-only); write() creates it.
+  private files(): string[] {
+    try {
+      return readdirSync(this.dir).filter((f) => f.endsWith(".json")).map((f) => join(this.dir, f));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw e;
+    }
+  }
+
   async list(): Promise<Lane[]> {
-    mkdirSync(this.dir, { recursive: true });
     const lanes: Lane[] = [];
-    for (const f of readdirSync(this.dir)) if (f.endsWith(".json")) lanes.push((await Bun.file(join(this.dir, f)).json()) as Lane);
+    for (const f of this.files()) lanes.push((await Bun.file(f).json()) as Lane);
     return lanes;
+  }
+
+  /** Like list(), but a lane file that cannot be read, parsed, or holds no lane key is returned in `unreadable` instead of throwing. */
+  async scan(): Promise<{ lanes: Lane[]; unreadable: string[] }> {
+    const lanes: Lane[] = [];
+    const unreadable: string[] = [];
+    for (const f of this.files()) {
+      try {
+        const lane: unknown = await Bun.file(f).json();
+        if (typeof lane !== "object" || lane === null || !("key" in lane) || typeof lane.key !== "string") throw new Error("not a lane record");
+        lanes.push(lane as Lane);
+      } catch {
+        unreadable.push(f);
+      }
+    }
+    return { lanes, unreadable };
   }
 
   async open(): Promise<Lane[]> {
     return (await this.list()).filter((l) => statusOf(l) !== "closed");
   }
 
+  /**
+   * The open lane in `pane`. A record keyed `lead` (registered before the key was reserved) is never returned, so a
+   * pane lookup cannot mistake the lead for a lane; that record is still read by its key, listed, and closed by hand.
+   */
   async byPane(pane: string): Promise<Lane | null> {
-    return (await this.open()).find((l) => l.pane === pane) ?? null;
+    return (await this.open()).find((l) => l.pane === pane && !RESERVED_LANE_KEYS.includes(l.key)) ?? null;
   }
 }

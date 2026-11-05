@@ -1,6 +1,9 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { SupervisionOptions } from "./supervision.ts";
+import type { CommitIdentity } from "./verify-pr.ts";
+
 export type ArgvTemplate = readonly string[];
 
 export type Hooks = {
@@ -30,6 +33,7 @@ export type DoriConfig = {
   readonly agentCommand: ArgvTemplate;
   readonly defaultModel: string;
   readonly launchKeywords: string;
+  readonly goalMarker: string;
   readonly sessionsDir: string;
   readonly nudgeAfterMin: number;
   readonly postAfterMin: number;
@@ -39,6 +43,9 @@ export type DoriConfig = {
   readonly deadPanePatterns: readonly string[];
   readonly guard: GuardThresholds;
   readonly hooks: Hooks;
+  /** Expected Git author and committer per lowercase `owner/repo`, for `verify-pr` and the lane footer. */
+  readonly repoIdentities: Readonly<Record<string, CommitIdentity>>;
+  readonly supervision: SupervisionOptions;
 };
 
 export const defaultConfig = (home = homedir()): DoriConfig => ({
@@ -52,6 +59,7 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   agentCommand: ["omo", "--model", "{model}", "{prompt}"],
   defaultModel: "anthropic/claude-opus-5-5",
   launchKeywords: "ulw set goal and work",
+  goalMarker: "Pursuing goal",
   sessionsDir: join(home, ".omo", "agent", "sessions"),
   nudgeAfterMin: 15,
   postAfterMin: 20,
@@ -61,19 +69,86 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   deadPanePatterns: ["has stopped", "no suitable jobs"],
   guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 },
   hooks: {},
+  repoIdentities: {},
+  supervision: { hungAfterMinutes: 20, staleAfterMinutes: 20, defaults: { wallMinutes: null, tokens: null, costUsd: null } },
 });
 
 export const configPath = (): string => process.env.DORI_CONFIG ?? join(homedir(), ".dori", "config.json");
 
 export const expandHome = (path: string, home = homedir()): string => (path === "~" ? home : path.startsWith("~/") ? join(home, path.slice(2)) : path);
 
+const isIdentity = (value: unknown): value is CommitIdentity => {
+  const v = value as { name?: unknown; email?: unknown } | null;
+  return typeof v === "object" && v !== null && typeof v.name === "string" && !!v.name.trim() && typeof v.email === "string" && !!v.email.trim();
+};
+
+// The file is untrusted JSON: keep only well-formed identities, so a bad entry reads as an unconfigured repo.
+const repoIdentities = (value: unknown): Record<string, CommitIdentity> =>
+  typeof value !== "object" || value === null || Array.isArray(value) ? {}
+    : Object.fromEntries(Object.entries(value).flatMap(([repo, identity]) => (isIdentity(identity) ? [[repo.toLowerCase(), identity]] : [])));
+
+export class ConfigError extends Error {}
+
+const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+
+const SUPERVISION_KEYS = new Set(["hungAfterMinutes", "staleAfterMinutes", "defaults", "lanes", "usageArgv", "recordCostArgv", "activityPaths", "gitActivity"]);
+const CEILINGS = new Set(["wallMinutes", "tokens", "costUsd"]);
+const checkCeilingNames = (where: string, budget: Record<string, unknown>): void => {
+  for (const name of Object.keys(budget)) {
+    if (!CEILINGS.has(name)) throw new ConfigError(`invalid supervision ${where}.${name}: unknown ceiling (expected wallMinutes, tokens or costUsd)`);
+  }
+};
+
+// A malformed supervision entry stops with its name: dropping it could turn a ceiling off, and keeping it would crash
+// every sweep later. A misspelt name is refused for the same reason.
+const checkSupervision = (value: unknown): void => {
+  if (value === undefined) return;
+  if (!isRecord(value)) throw new ConfigError("invalid supervision: expected an object");
+  for (const name of Object.keys(value)) {
+    if (!SUPERVISION_KEYS.has(name)) throw new ConfigError(`invalid supervision ${name}: unknown setting`);
+  }
+  for (const name of ["defaults", "lanes"] as const) {
+    if (value[name] !== undefined && !isRecord(value[name])) throw new ConfigError(`invalid supervision ${name}: expected an object`);
+  }
+  if (isRecord(value.defaults)) checkCeilingNames("defaults", value.defaults);
+  for (const [key, budget] of Object.entries(isRecord(value.lanes) ? value.lanes : {})) {
+    if (!isRecord(budget)) throw new ConfigError(`invalid supervision lanes.${key}: expected an object`);
+    checkCeilingNames(`lanes.${key}`, budget);
+  }
+  for (const name of ["usageArgv", "recordCostArgv", "activityPaths"] as const) {
+    const list = value[name];
+    if (list !== undefined && !(Array.isArray(list) && list.every((item) => typeof item === "string"))) {
+      throw new ConfigError(`invalid supervision ${name}: expected an array of strings`);
+    }
+  }
+  if (value.gitActivity !== undefined && typeof value.gitActivity !== "boolean") throw new ConfigError("invalid supervision gitActivity: expected true or false");
+};
+
 export const loadConfig = async (path = configPath(), home = homedir()): Promise<DoriConfig> => {
   const base = defaultConfig(home);
   const file = Bun.file(path);
   const raw = (await file.exists()) ? ((await file.json()) as Partial<DoriConfig>) : {};
-  const merged: DoriConfig = { ...base, ...raw, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks } };
+  checkSupervision(raw.supervision);
+  const merged: DoriConfig = {
+    ...base, ...raw, guard: { ...base.guard, ...raw.guard }, hooks: { ...base.hooks, ...raw.hooks }, repoIdentities: repoIdentities(raw.repoIdentities),
+    // Only a string is a marker: null or false would quietly turn the goal check off, and an object would never show.
+    goalMarker: typeof raw.goalMarker === "string" ? raw.goalMarker : base.goalMarker,
+    supervision: { ...base.supervision, ...raw.supervision, defaults: { ...base.supervision.defaults, ...raw.supervision?.defaults } },
+  };
+  for (const [name, value] of Object.entries({
+    hungAfterMinutes: merged.supervision.hungAfterMinutes,
+    staleAfterMinutes: merged.supervision.staleAfterMinutes,
+    ...merged.supervision.defaults,
+  })) {
+    if (value != null && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) throw new ConfigError(`invalid supervision ${name}: expected a nonnegative number or null`);
+  }
+  for (const [key, budget] of Object.entries(merged.supervision.lanes ?? {})) {
+    for (const [name, value] of Object.entries(budget)) {
+      if (value != null && (typeof value !== "number" || !Number.isFinite(value) || value < 0)) throw new ConfigError(`invalid supervision lanes.${key}.${name}: expected a nonnegative number or null`);
+    }
+  }
   const mux = process.env.DORI_MUX ?? merged.mux;
-  if (mux !== "herdr" && mux !== "hc") throw new Error(`mux must be "herdr" or "hc", got "${mux}"`);
+  if (mux !== "herdr" && mux !== "hc") throw new ConfigError(`mux must be "herdr" or "hc", got "${mux}"`);
   return {
     ...merged,
     mux,
