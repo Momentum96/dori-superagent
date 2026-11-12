@@ -44,10 +44,12 @@ const PATTERNS = PHRASES.map(([kind, source]) => ({ kind, re: new RegExp(source,
 const JOINS = /[a-z0-9_/\\.-]/i;
 /**
  * A `word` match stands alone when nothing in JOINS touches its end (a `.` only when a word goes on: `reached.` ends a
- * sentence, `limited.md` is a file), and nothing touches its start, except when a join glued it onto a pane-wide line,
- * whatever that line ended in (`ok`, `....`, `----`, a path). Then it must read as printed text: it starts with a
- * capital and has a space (`...okRate limit reached`), which camelCase (`onRateLimitExceeded`) and lower-case names
- * (`fix-rate-limit-error`) never are.
+ * sentence, `limited.md` is a file), and nothing touches its start. A JOINS character before it is allowed only
+ * when the match reads as printed text: it starts with a capital and has a space (`...okRate limit reached`,
+ * `----Rate limit reached`, `/path/Rate limit exceeded`). That is how a join glues a phrase onto a pane-wide line, but
+ * the check is on the match itself, not on where the line ends, so a mid-line `xRate limit reached` counts too. A `_`
+ * before it never does (`foo_Rate limit exceeded` is a name), nor do camelCase (`onRateLimitExceeded`) and lower-case
+ * names (`fix-rate-limit-error`).
  */
 const standsAlone = (text: string, at: number, found: string): boolean => {
   const after = text[at + found.length] ?? "";
