@@ -36,7 +36,7 @@ const launch: Command = async ({ key, opt, need, ceiling, strings, values, deps 
   for (const warning of r.warnings) console.error(warning);
   console.log(`LAUNCHED ${r.lane.key} pane=${r.lane.pane} tab=${r.lane.tab ?? "?"}`);
   console.log(r.startup);
-  process.exit(r.startup.startsWith("STARTUP_OK") ? 0 : 3);
+  process.exit(r.startup.startsWith("STARTUP_OK") || r.startup.startsWith("STARTUP_DONE") ? 0 : 3);
 };
 
 const adopt: Command = async ({ key, opt, need, deps }) => {
