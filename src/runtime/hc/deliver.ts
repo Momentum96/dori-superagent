@@ -86,7 +86,27 @@ export async function keys(exec: Exec, id: string, names: readonly Key[]): Promi
   await hcCall(exec, ["keys", id, ...names.map((k) => KEY_NAMES[k])]);
 }
 
-export async function read(exec: Exec, id: string, lines: number): Promise<string> {
+export async function read(exec: Exec, id: string, lines: number, unwrapped = false): Promise<string> {
   const result = await hcCall(exec, ["read", id, "--lines", String(lines)]);
-  return typeof result["text"] === "string" ? result["text"] : "";
+  const text = typeof result["text"] === "string" ? result["text"] : "";
+  if (!unwrapped) return text;
+  const cols = (await hcCall(exec, ["get", id]))["cols"];
+  return typeof cols === "number" && cols > 0 ? joinWrapped(text, cols) : text;
 }
+
+/**
+ * hc prints screen rows with trailing blanks cut and says nothing about wrapping, so a row that fills the terminal is
+ * taken as wrapped: `cols` cells wide, or `cols - 1` when the wrap fell on a space that was cut. Width is counted in
+ * terminal cells (a CJK character or an emoji is two). A line the agent printed exactly that wide is joined to the next
+ * one too: callers must not treat a joined line as one message (launch strips only the warning text, never a line).
+ */
+export const joinWrapped = (text: string, cols: number): string => {
+  const lines: string[] = [];
+  let open = false;
+  for (const row of text.split("\n")) {
+    if (open) lines[lines.length - 1] += row;
+    else lines.push(row);
+    open = cols > 1 && Bun.stringWidth(row) >= cols - 1;
+  }
+  return lines.join("\n");
+};

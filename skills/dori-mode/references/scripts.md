@@ -28,6 +28,7 @@ Needs: bun 1.3+, herdr or hc, git, and the GitHub CLI (`gh`) for `merged`/`close
 | `defaultCwd` | home | where lanes start, and the repo whose worktrees they own |
 | `agentCommand`, `defaultModel`, `launchKeywords` | `omo --model {model} {prompt}` | `launch` |
 | `goalMarker` | `Pursuing goal` | `launch`: the agent's status text while a goal is active, for agents without omo's goal record; empty turns the goal check off, and a value that is not a string uses the default |
+| `startupWaitSeconds` | 180 | `launch`: how long after the start it waits for the agent's ready status and goal; raise it on a slow host. A value that is not a nonnegative number uses the default |
 | `sessionsDir` | `~/.omo/agent/sessions` | session-id lookup |
 | `nudgeAfterMin`, `postAfterMin` | 15, 20 | `freshness` |
 | `closeAfterMin` | 5 | `watch` |
@@ -63,7 +64,7 @@ Every module takes its HTTP, clock and timers as arguments. That is how the test
 ## Commands
 
 ### `dori launch <key> --title T --brief FILE --done "..." [--thread REF] [--model M] [--cwd DIR] [--dry-run]`
-Opens a lane: puts the current lessons (below), global and the repo's, above the brief, appends the footer, opens a tab, starts the agent, and after 20 seconds checks it: `STARTUP_ERROR` on a known failure in the pane (at that check, or on an idle agent with no goal during the goal wait), `STARTUP_OK` only when the runtime reports the agent idle or working and it has a goal (unless `goalMarker` is empty): omo's goal record for the session this launch started (`sessionsDir`, matched by the launch prompt naming the lane) is active, which holds at any pane width, or `goalMarker` shows in the pane's footer, its last three non-empty lines, so agent output above it does not count, `STARTUP_NO_GOAL` when the agent runs but shows no goal for another 60 seconds, and `STARTUP_UNCONFIRMED` (with the last lines) otherwise. Exit 3 on anything but `STARTUP_OK`.
+Opens a lane: puts the current lessons (below), global and the repo's, above the brief, appends the footer, opens a tab, starts the agent, and after 20 seconds checks it: `STARTUP_ERROR` on a known failure in the pane, not counting a line that is omo's warning about an extension it cannot load (the screen is read unwrapped, so the warning counts as one line however narrow the pane; at that check, or on an idle agent with no goal during the goal wait), `STARTUP_OK` only when the runtime reports the agent idle or working and it has a goal (unless `goalMarker` is empty): omo's goal record for the session this launch started (`sessionsDir`, matched by the launch prompt naming the lane) is active, which holds at any pane width, or `goalMarker` shows in the pane's footer, its last three non-empty lines, so agent output above it does not count, `STARTUP_NO_GOAL` when the agent runs but still shows no goal `startupWaitSeconds` after the start (an agent that has not reported a status yet is waited for the same way, while a `shell`, a failed status lookup or a known failure ends the wait at once), and `STARTUP_UNCONFIRMED` (with the last lines) otherwise. Exit 3 on anything but `STARTUP_OK`.
 
 `--dry-run` prints the brief as the lane would get it, lessons and footer included, and changes nothing.
 

@@ -2,10 +2,10 @@ import { fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { laneGoalActive } from "./goal-record.ts";
 import { BRIEF_START, footer, originalBrief, quoteForPane } from "./launch-footer.ts";
+import type { Runtimes } from "../../../../src/runtime/registry.ts";
 import { parseRef, type SessionRef } from "../../../../src/runtime/types.ts";
 import { LANE_KEY, type Lane, RESERVED_LANE_KEY, sessionFields, upgradeLane } from "./registry.ts";
 import { iso, runtimesOf } from "./run.ts";
-import { readScreen, statusLookup } from "./sessions.ts";
 import { Reports } from "./reports.ts";
 import { doneSyntaxErrors } from "./signals.ts";
 import type { BudgetLimits } from "./supervision-observe.ts";
@@ -27,12 +27,45 @@ export class LaunchError extends Error {}
 
 const STARTUP_FAILURE =
   /Cannot find module|All fallback models failed|No API key|model_not_available|usage limit|rate limit|quota|Session crashed|unknown provider/i;
+// omo warns about a user extension it cannot load (`Warning: Failed to load extension "...": ... Cannot find module ...`)
+// and starts anyway (#202). Only the warning's own text is removed, never the rest of its line: a row-wrap join can put a
+// real failure on the same line. The path may hold the newline of a row the join missed, and a space cut at a wrap may
+// be gone, so every gap between words is optional whitespace.
+const EXTENSION_WARNING =
+  /Warning:\s*Failed\s*to\s*load\s*extension\s*"[^"]*":\s*(?:Failed\s*to\s*load\s*extension:\s*)?Cannot\s*find\s*module\s*'[^']*'/g;
+// A real warning names the extension's full path, so a narrow pane wraps it and `Cannot find module` lands on a later
+// row. The startup checks therefore read the screen unwrapped: one line per line the agent printed.
+const startupScreen = (rts: Runtimes, ref: SessionRef): Promise<string> =>
+  rts.for(ref).read(ref, 40, { unwrapped: true });
+const startupFailure = (screen: string): RegExpExecArray | null =>
+  STARTUP_FAILURE.exec(screen.replace(EXTENSION_WARNING, ""));
+// The first check is 20 s after start, then the screen and status are re-read every 10 s until `startupWaitSeconds`.
+const FIRST_CHECK_MS = 20_000;
+const RECHECK_MS = 10_000;
+/**
+ * The runtime's own status word for the lane's session. Unlike agentStatus it keeps `shell` (no agent in the session)
+ * apart from no status yet: herdr lists an agent that has not reported as `unknown` and a pane with no agent as `shell`.
+ * hc lists both with no status, so a session listed with none is probed, which names a shell in front. A session missing
+ * from the list is `gone`.
+ */
+const launchStatus = async (rts: Runtimes, ref: SessionRef): Promise<{ status?: string; error?: string }> => {
+  try {
+    const found = (await rts.for(ref).list()).find((s) => s.ref.id === ref.id);
+    if (!found) return { status: "gone" };
+    if (found.status !== undefined) return { status: found.status };
+    const probed = (await rts.for(ref).probe(ref)).status;
+    return probed === "shell" || probed === "gone" ? { status: probed } : {};
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
+  }
+};
+const ready = (s: string | undefined): boolean => s === "idle" || s === "working";
+const unreported = (s: string | undefined): boolean => s === undefined || s === "unknown";
 // `goalMarker` is the agent's status text while a goal is active (omo: `Pursuing goal`). A lane that starts but never
 // sets its goal stops after its first turn, so a ready status alone is not a good start. The status line shares its row
 // with other extensions' status text, so the marker is matched in the footer (the last lines), never in agent output
 // that quotes it. An empty marker turns the check off. The footer is cut to the pane's width (a narrow pane shows
 // "Pur..."), so omo's own goal record for the lane's session counts too, whatever the width (#122).
-const GOAL_CHECKS = 6;
 const goalShown = (screen: string, marker: string): boolean =>
   screen
     .split("\n")
@@ -153,27 +186,36 @@ const startLane = async (
     return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: start failed: ${lastLines(String(e))}` };
   }
   const started = deps.clock.now();
-  await deps.clock.sleep(20_000);
-  const screen = await readScreen(rts, ref, 40);
-  const bad = STARTUP_FAILURE.exec(screen);
+  await deps.clock.sleep(FIRST_CHECK_MS);
+  const screen = await startupScreen(rts, ref);
+  const bad = startupFailure(screen);
   if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${bad[0]}` };
-  const { status, error } = await statusLookup(rts, ref);
-  if (status === "idle" || status === "working") {
+  const { status, error } = await launchStatus(rts, ref);
+  // No status and no lookup error is an agent still starting (a slow host can take minutes, #202): it is waited for in
+  // the goal wait. A lookup error, a `shell` or any other status ends the launch below at once.
+  if (ready(status) || (unreported(status) && !error)) {
     const marker = deps.config.goalMarker;
     const hasGoal = (shown: string): boolean =>
       goalShown(shown, marker) || laneGoalActive(deps.config.sessionsDir, cwd, input.key, started);
+    const rechecks = Math.max(0, Math.ceil((deps.config.startupWaitSeconds * 1000 - FIRST_CHECK_MS) / RECHECK_MS));
     let shown = screen;
-    for (let check = 0; marker && !hasGoal(shown); check++) {
-      if (check === GOAL_CHECKS)
+    let current = status;
+    for (let check = 0; !ready(current) || (marker && !hasGoal(shown)); check++) {
+      if (check >= rechecks) {
+        const waited = Math.round((deps.clock.now() - started) / 1000);
         return {
           lane,
-          startup: `STARTUP_NO_GOAL ${input.key} ${pane}: the agent is running but shows no goal after ${Math.round((deps.clock.now() - started) / 1000)} s; last lines: ${lastLines(shown)}`,
+          startup: ready(current)
+            ? `STARTUP_NO_GOAL ${input.key} ${pane}: the agent is running but shows no goal after ${waited} s; last lines: ${lastLines(shown)}`
+            : `STARTUP_UNCONFIRMED ${input.key} ${pane}: no ready agent status (${current ?? "none"}) after ${waited} s; last lines: ${lastLines(shown)}`,
         };
-      await deps.clock.sleep(10_000);
-      shown = await readScreen(rts, ref, 40);
+      }
+      await deps.clock.sleep(RECHECK_MS);
+      shown = await startupScreen(rts, ref);
       // The goal is only good news while the agent is still running: re-check the status on every re-read.
-      const again = await statusLookup(rts, ref);
-      if (again.status !== "idle" && again.status !== "working") {
+      const again = await launchStatus(rts, ref);
+      current = again.status;
+      if (again.error || !(ready(current) || unreported(current))) {
         const lost = again.error
           ? `status lookup failed: ${again.error}`
           : `agent status became ${again.status ?? "none"}`;
@@ -184,7 +226,7 @@ const startLane = async (
       }
       // A late failure stops the agent. A working agent's own output may quote these phrases (a file or log it reads),
       // so only an idle agent with no goal is checked for one.
-      const failed = again.status === "idle" && !hasGoal(shown) ? STARTUP_FAILURE.exec(shown) : null;
+      const failed = current !== "working" && !hasGoal(shown) ? startupFailure(shown) : null;
       if (failed) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${failed[0]}` };
     }
     return { lane, startup: `STARTUP_OK ${input.key} ${pane}` };
