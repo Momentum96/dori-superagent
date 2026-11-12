@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 
 import type { DoriConfig } from "../src/config.ts";
-import { adoptLane } from "../src/launch.ts";
+import { adoptLane } from "../src/launch-adopt.ts";
 import { depsFor, fakeClock, newWorld, withState, type World } from "./fakes.ts";
 
 const T0 = Date.parse("2026-01-01T12:00:00.000Z");
