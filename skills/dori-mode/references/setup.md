@@ -2,15 +2,27 @@
 
 Run these once, in order. Stop and ask the owner wherever a step needs their choice or their hand.
 
-## 1. herdr
+## 1. herdr or hc
 
-herdr is the terminal multiplexer the Dori runs in. Every lane is a herdr tab, and herdr lets you read a pane, type into it and see which process runs there.
+The Dori runs its sessions on one of two runtimes. herdr is a terminal multiplexer: every lane is a herdr tab, and herdr lets you read a pane, type into it and see which process runs there. hc (herdr-core) keeps each lane in its own terminal, labelled with the lane key, and learns the agent's status only from the agent's own OSC 7501 report (recent omo builds send it).
+
+herdr:
 
 ```sh
 curl -fsSL https://herdr.dev/install.sh | sh
 herdr integration install pi        # or the integration for the agent you run in
 herdr --skill                       # load its skill unless it is already in your context
 ```
+
+hc:
+
+```sh
+curl -fsSL https://releases.herdr.dev/core/install.sh | sh
+mkdir -p ~/.config/herdr-core && echo 'notes = false' >> ~/.config/herdr-core/config.toml
+hc --skill                          # load its skill unless it is already in your context
+```
+
+`notes = false` stops hc from typing notes into a parent agent on its own, so the Dori's own sends are the only text that reaches a lane. With both installed, the Dori runs on hc unless `"runtime": "herdr"` is set in step 4; with only one on PATH, it uses that one.
 
 ## 2. Messenger
 
@@ -51,14 +63,11 @@ Greet the owner through the bot before doing anything else.
 ## 4. Scripts
 
 ```sh
-cd skills/dori-mode/scripts && bun install && bun link    # puts `dori-mode` on PATH
-cd ../../.. && bun install && bun link                     # puts `dori` on PATH (runs every command below)
-mkdir -p ~/.dori && cp skills/dori-mode/references/config.example.json ~/.dori/config.json
+cd skills/dori-mode/scripts && bun install && bun link    # puts `dori` on PATH
+mkdir -p ~/.dori && cp ../references/config.example.json ~/.dori/config.json
 ```
 
-Then edit `~/.dori/config.json`: at least `leadPane` (your own herdr pane, from `herdr pane current`), `laneWorkspace`, `defaultCwd`, and the two hooks if you want lane threads updated automatically. `references/scripts.md` explains every field.
-
-On herdr-core, set `"mux": "hc"`: `leadPane` is your hc terminal (`echo $HC_TERMINAL_ID`), and `laneWorkspace`/`workspaces` are Herdr app space ids (the `herdr.space` label in `hc get <terminal>`). See `sessions.md` for the hc commands.
+Then edit `~/.dori/config.json`: at least `runtime` (`"herdr"` or `"hc"`), `leadPane` (your own session: `herdr pane current` on herdr, `echo $HC_TERMINAL_ID` on hc), `laneWorkspace` (a herdr workspace; on hc, the `dori.group` label the lane terminals get), `defaultCwd`, and the two hooks if you want lane threads updated automatically. `references/scripts.md` explains every field.
 
 ## 5. Monitors
 
@@ -67,7 +76,6 @@ Arm these as persistent monitors in your own session:
 | Monitor | Command | Filter |
 |---|---|---|
 | inbound messages | your messenger's watch command | new owner messages |
-| Discord inbound (Discord only) | `while true; do dori inbound discord --channel <id> --owner <id>; echo "DORI_WATCH_RESTART exit=$?"; sleep 5; done` | `DORI_INBOUND\|DORI_WATCH_RESTART` |
 | done flow | `dori watch` | `^LANE_` |
 | dead panes | `dori dead-panes --loop 3` | `^(DEAD_PANE\|UNRECOGNISED_PANE)` |
 | host guard | `dori guard --loop 1` | `^HOST_GUARD` |
@@ -75,10 +83,6 @@ Arm these as persistent monitors in your own session:
 | Slack inbound (Slack only) | `dori inbound slack --loop 1` | `^INBOUND` |
 | Telegram inbound (Telegram only) | `DORI_TELEGRAM_TOKEN=… DORI_TELEGRAM_OWNER_ID=… dori inbound telegram --loop 1` | `^INBOUND` |
 | presence (optional) | `dori presence slack` or `dori presence discord` | `^PRESENCE_READY` |
-
-The Discord row restarts the watcher whenever it exits. If `DORI_WATCH_RESTART` keeps coming back, read the watcher's own `DORI_WATCH` lines (token, channel, permissions or state file) before anything else.
-
-With the harness's duty session (`dori up`, see the repository README), the duty loop runs the dead-pane and freshness sweeps itself. Then leave those two monitors out, so no lane is nudged twice, and arm `dori duty-watch --loop 1` (filter `^DUTY_`) instead: it says `DUTY_STALE` when the loop stops, and `dori up` brings it back.
 
 ## 6. First look around
 

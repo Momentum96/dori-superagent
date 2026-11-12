@@ -1,6 +1,6 @@
 # Sessions (lanes)
 
-A lane is one agent session doing one job in its own herdr tab. You launch it, track it in the registry, answer it when it is stuck, and close it when its work is proven done.
+A lane is one agent session doing one job in its own herdr tab or hc terminal. You launch it, track it in the registry, answer it when it is stuck, and close it when its work is proven done.
 
 ## Launching
 
@@ -10,7 +10,7 @@ dori launch fix-login --title "Fix the login redirect loop" \
   --thread "telegram:<chat>/<topic>" --model anthropic/claude-opus-5-5
 ```
 
-`launch` checks the key and the `Done =` line, appends a footer to the brief, opens a tab in `laneWorkspace`, starts the agent, and after 20 seconds checks the start: `STARTUP_ERROR` on a known failure (missing module, no API key, rate limit, quota), also when one shows on an idle agent during the goal wait, `STARTUP_OK` only when herdr reports the agent idle or working and it shows a goal (checked again every 10 seconds for up to 60 more seconds), `STARTUP_NO_GOAL` when it still shows no goal after that, `STARTUP_UNCONFIRMED` otherwise. On `STARTUP_ERROR`, relaunch on another model; on `STARTUP_NO_GOAL`, tell the lane to set its goal, since a lane without one stops after its first turn; on `STARTUP_UNCONFIRMED`, look at the pane before doing anything else.
+`launch` checks the key and the `Done =` line, appends a footer to the brief, opens a tab in `laneWorkspace`, starts the agent, and after 20 seconds checks the start: `STARTUP_ERROR` on a known failure (missing module, no API key, rate limit, quota), also when one shows on an idle agent during the goal wait, `STARTUP_OK` only when the runtime reports the agent idle or working and it shows a goal (checked again every 10 seconds until `startupWaitSeconds`, 180 by default, after the start; an agent that has not reported a status yet is waited for too), `STARTUP_NO_GOAL` when it still shows no goal after that, `STARTUP_UNCONFIRMED` otherwise. On `STARTUP_ERROR`, relaunch on another model; on `STARTUP_NO_GOAL`, tell the lane to set its goal, since a lane without one stops after its first turn; on `STARTUP_UNCONFIRMED`, look at the pane before doing anything else.
 
 Write the brief like a careful prompt:
 
@@ -41,21 +41,6 @@ Done = command ["bun","test"] stdout~" 0 fail"; file qa/report.json json:.passed
 
 Work no script can check (a design review, a judgement call) stays in the lane's own plan. You judge it yourself before the claim.
 
-## Running on herdr-core (`hc`)
-
-With `"mux": "hc"` in the config, the scripts drive herdr-core instead of herdr: `laneWorkspace`/`workspaces` hold Herdr app space ids and panes are hc terminal addresses (`t7`). Lanes open as labelled terminals in that space (`herdr.space`, `dori.lane`) and outlive the lead. hc reports the agent state (`idle`, `working`, `blocked`, `done`) itself; it becomes the pane's `agent_status`. When you work a session by hand, use the hc equivalents:
-
-| herdr | hc |
-|---|---|
-| `herdr pane list` | `hc ls` |
-| `herdr pane read <id> --source recent-unwrapped --lines 40` | `hc read <t> --lines 40` |
-| `herdr pane send-text <id> <text>` + `send-keys <id> enter` | `hc send <t> <text>` (presses Enter itself) |
-| `herdr pane send-keys <id> <key>` | `hc keys <t> <key>` (`esc`, not `escape`) |
-| `herdr pane process-info --pane <id>` | `hc get <t>` (`pid`, `foreground`, `status`) |
-| `herdr pane close <id>` | `hc kill <t>`, then `hc rm <t>` |
-
-Lanes report with `dori report <key> --kind <kind> --text "..."`, which records the line on the lane (freshness posts the last one to the thread from there, since it never shows on the lane's own screen) and delivers it to the lead. `hc send` only reaches a terminal whose agent reports a state; text for a plain shell is refused. `$HC_TERMINAL_ID` is a session's own address.
-
 ## The registry
 
 One JSON file per lane under `<stateDir>/lanes/`, written atomically (temp file + rename), so two writers never leave a half-written file. Each lane records:
@@ -63,7 +48,7 @@ One JSON file per lane under `<stateDir>/lanes/`, written atomically (temp file 
 | Field | Meaning |
 |---|---|
 | `thread` | where its updates go, as `platform:thread` (or `none`) |
-| `pane`, `tab` | its herdr location |
+| `sessionRef` | its session: the runtime (`herdr` or `hc`) and the id; `pane` and `tab` mirror the id and the herdr tab (none on hc). A record from before runtimes existed is read as herdr |
 | `session` | the agent's own session id, so a closed job can be reopened later |
 | `status` | `working`, `done-claimed`, `verified-done`, `not-done`, `closed` |
 | `claim`, `objection`, `history` | what was claimed, what was objected, every status change |
@@ -84,10 +69,10 @@ When the owner writes in a closed lane's thread, reopen its recorded session in 
 
 Before you type into a pane:
 
-1. check it runs a live agent (`herdr pane process-info --pane <id>`), not a shell, a stopped agent or a startup screen;
-2. read it (`herdr pane read <id> --source recent-unwrapped --lines 40`) and confirm the input line is empty and no approval or question prompt is open;
+1. check it runs a live agent (`herdr pane process-info --pane <id>` / `hc get <t>`), not a shell, a stopped agent or a startup screen;
+2. read it (`herdr pane read <id> --source recent-unwrapped --lines 40` / `hc read <t> --lines 40`) and confirm the input line is empty and no approval or question prompt is open;
 3. send once, as one argument (the scripts' `sendVerified` does this);
-4. confirm delivery from a state change: the pane's `agent_status` moving to working, or the message showing up in the session record. Never press Enter again because of what the screen shows; if no change shows up, treat the send as unconfirmed.
+4. confirm delivery from a state change: the agent's status moving to working (herdr's `agent_status`, or the status the agent reports on hc), or the message showing up in the session record. Never press Enter again because of what the screen shows; if no change shows up, treat the send as unconfirmed.
 
 Exit code 0 and echoed input are not proof the agent got the message. A reply from the session, or its record of handling the message, is.
 

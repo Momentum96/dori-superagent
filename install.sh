@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Installs the dori-mode skill and the `dori` CLI (the harness, which also runs Dori mode's commands).
+# Installs the dori-mode skill and the `dori` CLI.
 # Usage: curl -fsSL https://raw.githubusercontent.com/sisyphuslabs/dori-superagent/main/install.sh | bash
 # Needs: git, bun 1.3+. Optional env: DORI_SRC (clone dir), SKILLS_DIR (where your agent loads skills),
 # DORI_NO_PULL=1 (or true, yes: install an existing checkout as it is, without pulling).
@@ -41,8 +41,7 @@ else
   ln -sfn "$src/skills/dori-mode" "$skills/dori-mode"
 fi
 
-(cd "$src/skills/dori-mode/scripts" && bun install --silent && bun link --silent)   # dori-mode
-(cd "$src" && bun install --silent && bun link --silent)                              # dori
+(cd "$src/skills/dori-mode/scripts" && bun install --silent && bun link --silent)
 
 mkdir -p "$HOME/.dori"
 [ -f "$HOME/.dori/config.json" ] || cp "$src/skills/dori-mode/references/config.example.json" "$HOME/.dori/config.json"
