@@ -176,4 +176,35 @@ test("on hc, a program that has not reported a status yet is waited for, and one
   expect(await launch("hc-exact", { ...atWidth, screen: joined })).toBe(
     "STARTUP_ERROR hc-exact t1: Cannot find module",
   );
+  // Bun goes on past the module path with the extension's own path; a directory named quota-meter is no failure.
+  for (const [i, tail] of [
+    " imported from /Users/someone/.omo/agent/extensions/quota-meter/index.js",
+    " from '/Users/someone/.omo/agent/extensions/quota-meter/index.js'",
+  ].entries()) {
+    const quota = wrap(`${longWarning}${tail}`, 80);
+    expect(await launch(`hc-quota-${i}`, { ...atWidth, screen: `${quota}\n❯ \n Pursuing goal (1m)` })).toBe(
+      `STARTUP_OK hc-quota-${i} t1`,
+    );
+  }
+  // A failure whose words a wrap split on a space (hc cuts the space, so the joined line reads "ratelimit") still counts.
+  const limited = wrap("Error from provider: rate limit reached, retry later", 26);
+  expect(limited.split("\n")[0]).toBe("Error from provider: rate");
+  expect(await launch("hc-split", { ...atWidth, cols: 26, screen: `${limited}\n$ ` })).toBe(
+    "STARTUP_ERROR hc-split t1: rate limit",
+  );
+  // A failure glued onto the end of the extension path by a join still counts, after either tail form.
+  const glued = `${exact} imported from /x/extensions/quota-meter/index.jsNo API key found\n$ `;
+  expect(await launch("hc-glued", { ...atWidth, screen: glued })).toBe("STARTUP_ERROR hc-glued t1: No API key");
+  // An unquoted path with a space in it is still the warning's own.
+  const spacedPath = `${longWarning} imported from /Users/John Doe/.omo/agent/extensions/quota-meter/index.js`;
+  expect(await launch("hc-spaced", { ...atWidth, screen: `${spacedPath}\n❯ \n Pursuing goal (1m)` })).toBe(
+    "STARTUP_OK hc-spaced t1",
+  );
+  // Code and names that only look like a failure once the gap is gone are no failure: rateLimit, ratelimiter, noApiKey.
+  const code = "const rateLimit = ratelimiter(noApiKey, usageLimit); // SessionCrashed\n❯ \n Pursuing goal (1m)";
+  expect(await launch("hc-code", { ...atWidth, screen: code })).toBe("STARTUP_OK hc-code t1");
+  // A real line break between two words is two lines, not a failure: moderate / limits.
+  expect(
+    await launch("hc-break", { ...atWidth, screen: "load is moderate\nlimits apply\n❯ \n Pursuing goal (1m)" }),
+  ).toBe("STARTUP_OK hc-break t1");
 });

@@ -10,6 +10,7 @@ import { Reports } from "./reports.ts";
 import { doneSyntaxErrors } from "./signals.ts";
 import type { BudgetLimits } from "./supervision-observe.ts";
 import { Lessons, renderLessons } from "./lessons.ts";
+import { startupFailure, startupScreen } from "./startup-screen.ts";
 
 export type LaunchInput = {
   readonly key: string;
@@ -25,20 +26,6 @@ export type LaunchInput = {
 
 export class LaunchError extends Error {}
 
-const STARTUP_FAILURE =
-  /Cannot find module|All fallback models failed|No API key|model_not_available|usage limit|rate limit|quota|Session crashed|unknown provider/i;
-// omo warns about a user extension it cannot load (`Warning: Failed to load extension "...": ... Cannot find module ...`)
-// and starts anyway (#202). Only the warning's own text is removed, never the rest of its line: a row-wrap join can put a
-// real failure on the same line. The path may hold the newline of a row the join missed, and a space cut at a wrap may
-// be gone, so every gap between words is optional whitespace.
-const EXTENSION_WARNING =
-  /Warning:\s*Failed\s*to\s*load\s*extension\s*"[^"]*":\s*(?:Failed\s*to\s*load\s*extension:\s*)?Cannot\s*find\s*module\s*'[^']*'/g;
-// A real warning names the extension's full path, so a narrow pane wraps it and `Cannot find module` lands on a later
-// row. The startup checks therefore read the screen unwrapped: one line per line the agent printed.
-const startupScreen = (rts: Runtimes, ref: SessionRef): Promise<string> =>
-  rts.for(ref).read(ref, 40, { unwrapped: true });
-const startupFailure = (screen: string): RegExpExecArray | null =>
-  STARTUP_FAILURE.exec(screen.replace(EXTENSION_WARNING, ""));
 // The first check is 20 s after start, then the screen and status are re-read every 10 s until `startupWaitSeconds`.
 const FIRST_CHECK_MS = 20_000;
 const RECHECK_MS = 10_000;
@@ -189,7 +176,7 @@ const startLane = async (
   await deps.clock.sleep(FIRST_CHECK_MS);
   const screen = await startupScreen(rts, ref);
   const bad = startupFailure(screen);
-  if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${bad[0]}` };
+  if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${bad}` };
   const { status, error } = await launchStatus(rts, ref);
   // No status and no lookup error is an agent still starting (a slow host can take minutes, #202): it is waited for in
   // the goal wait. A lookup error, a `shell` or any other status ends the launch below at once.
@@ -227,7 +214,7 @@ const startLane = async (
       // A late failure stops the agent. A working agent's own output may quote these phrases (a file or log it reads),
       // so only an idle agent with no goal is checked for one.
       const failed = current !== "working" && !hasGoal(shown) ? startupFailure(shown) : null;
-      if (failed) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${failed[0]}` };
+      if (failed) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${failed}` };
     }
     return { lane, startup: `STARTUP_OK ${input.key} ${pane}` };
   }

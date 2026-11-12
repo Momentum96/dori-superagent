@@ -47,13 +47,15 @@ describe("typed text, shells, keys", () => {
       ["read", "t1", "--lines", "40"],
       ["get", "t1"],
     ]);
-    // A wrap on a space comes back one cell short (hc cuts the blank), and width is counted in cells, not code units.
-    const spaced = ["Warning: Failed t", "o load ext x", "完了完了完了完了完", "了 path", "完了 short", "$ "].join(
-      "\n",
-    );
-    const { rt: cells } = rig({ t1: terminal({ screen: spaced, cols: 18 }) });
+    // A wrap on a space comes back one cell short (hc cuts the blank), and the join puts that space back.
+    const spaced = ["Error: rate", "limit hit", "$ "].join("\n");
+    const { rt: cut } = rig({ t1: terminal({ screen: spaced, cols: 12 }) });
+    expect(await cut.read(T1, 40, { unwrapped: true })).toBe(["Error: rate limit hit", "$ "].join("\n"));
+    // Width is counted in cells, not code units: nine CJK characters fill 18 cells.
+    const wide = ["完了完了完了完了完", "了 path", "完了 short", "$ "].join("\n");
+    const { rt: cells } = rig({ t1: terminal({ screen: wide, cols: 18 }) });
     expect(await cells.read(T1, 40, { unwrapped: true })).toBe(
-      ["Warning: Failed to load ext x", "完了完了完了完了完了 path", "完了 short", "$ "].join("\n"),
+      ["完了完了完了完了完了 path", "完了 short", "$ "].join("\n"),
     );
     // Without a width the text comes back as read.
     const { rt: noCols } = rig({ t1: terminal({ screen }) });
