@@ -45,9 +45,9 @@ for (const check of [1, 2]) {
           const result = await launchLane({ ...base, run }, { key: "fast", title: "t", brief, done: "closed a/b#1" })
             .then((value) => value.startup)
             .catch((error: unknown) => `THREW ${String(error)}`);
-          if (done === "none")
-            expect(result.startsWith("STARTUP_UNCONFIRMED") || result.startsWith("THREW")).toBe(true);
-          else expect(result).toBe("STARTUP_DONE fast");
+          if (done !== "none") expect(result).toBe("STARTUP_DONE fast");
+          else if (disappearance === "read") expect(result).toStartWith("THREW HcError");
+          else expect(result).toStartWith("STARTUP_UNCONFIRMED fast t1:");
         } finally {
           state.done();
         }
