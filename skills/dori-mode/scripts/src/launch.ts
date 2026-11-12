@@ -4,7 +4,7 @@ import { laneGoalActive } from "./goal-record.ts";
 import { BRIEF_START, footer, originalBrief, quoteForPane } from "./launch-footer.ts";
 import type { Runtimes } from "../../../../src/runtime/registry.ts";
 import { parseRef, type SessionRef } from "../../../../src/runtime/types.ts";
-import { LANE_KEY, type Lane, RESERVED_LANE_KEY, sessionFields, upgradeLane } from "./registry.ts";
+import { LANE_KEY, type Lane, RESERVED_LANE_KEY, sessionFields } from "./registry.ts";
 import { iso, runtimesOf } from "./run.ts";
 import { Reports } from "./reports.ts";
 import { doneSyntaxErrors } from "./signals.ts";
@@ -87,9 +87,10 @@ export const adoptLane = async (deps: FlowDeps, input: LaunchInput & { readonly 
     cwd: input.cwd ?? deps.config.defaultCwd,
     openedAt: iso(deps.clock),
   };
-  // `hc:t7` or `herdr:w1:p3` names its runtime; any other id is a herdr pane, as before runtimes existed.
-  const ref = parseRef(input.pane);
-  const lane = ref ? { ...base, ...sessionFields(ref) } : upgradeLane({ ...base, pane: input.pane });
+  // `hc:t7`, `herdr:w1:p3` or a bare `w1:p3` names its runtime; any other id is a session on the runtime new lanes
+  // open on (as `dori boot` prints it), never the legacy herdr reading of records written before runtimes existed.
+  const ref = parseRef(input.pane) ?? { runtime: runtimesOf(deps).default.kind, id: input.pane };
+  const lane = { ...base, ...sessionFields(ref) };
   await deps.registry.write(lane);
   return lane;
 };
