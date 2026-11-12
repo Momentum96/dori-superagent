@@ -56,7 +56,7 @@ test("a workspace filter that leaves out laneWorkspace is a CONFIG_WARN and fail
   expect(result.lines.at(-1)).toBe("BOOT incomplete read-only; nothing restarted, written or stopped");
 });
 
-test("live agents in laneWorkspace that no filtered workspace matches are a CONFIG_WARN", async () => {
+test("live agents on herdr that no filtered workspace matches are a CONFIG_WARN", async () => {
   // Given no laneWorkspace configured to compare, and agents running only outside the filtered workspace.
   const world = newWorld();
   world.panes = [{ pane_id: "w2:p1", workspace_id: "w2" }, agent("w3:p1", "w3"), agent("w3:p2", "w3")];
@@ -96,6 +96,17 @@ test("DRIFT counts open lanes whose pane herdr reports gone; closed and live lan
   // And only the vanished open lanes were probed.
   const probed = world.calls.filter((c) => c[0] === "herdr" && c[2] === "get").map((c) => c[3]);
   expect(probed.sort()).toEqual(["w1:p8", "w1:p9"]);
+});
+
+test("a verified-done lane on a gone pane is not drift, as it is not VANISHED (crash before the closed write)", async () => {
+  // Given a lane settled as verified-done whose pane was closed before its status reached closed.
+  const world = newWorld();
+  world.panes = [{ pane_id: "w2:p1", workspace_id: "w2" }];
+  const result = await boot(world, {}, [lane("settled", "verified-done", { runtime: "herdr", id: "w1:p8" })]);
+  // Then boot neither flags nor probes it.
+  expect(result.lines).toContain("DRIFT n=0");
+  expect(result.lines.some((l) => l.startsWith("VANISHED"))).toBe(false);
+  expect(world.calls.some((c) => c[0] === "herdr" && c[2] === "get")).toBe(false);
 });
 
 test("on hc, DRIFT uses hc's own probe and the workspace check does not apply", async () => {

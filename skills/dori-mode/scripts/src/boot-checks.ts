@@ -3,7 +3,8 @@
 import type { Runtimes } from "../../../../src/runtime/registry.ts";
 import type { RuntimeKind, SessionInfo } from "../../../../src/runtime/types.ts";
 import type { DoriConfig } from "./config.ts";
-import { type Lane, sessionOf, statusOf } from "./registry.ts";
+import { type BootLane, finished } from "./boot-monitors.ts";
+import { sessionOf } from "./registry.ts";
 import { ALIVE_STATUSES } from "./sessions.ts";
 
 /** Runtimes whose sessions sit in workspaces that `config.workspaces` filters on. hc has none: its group is a label. */
@@ -39,12 +40,12 @@ export const workspaceCheck = (
 };
 
 /**
- * `DRIFT n=<count>`: lanes not closed whose session the runtime's own probe reports `gone`. Only lanes the session list
+ * `DRIFT n=<count>`: lanes not finished (closed, verified-done, or a done report, the lanes VANISHED skips too) whose session the runtime's own probe reports `gone`. Only lanes the session list
  * no longer shows are probed, so a live lane costs no extra call; a probe that fails is named. Any drift or failed probe fails the boot.
  */
 export const driftCheck = async (
   rts: Runtimes,
-  lanes: readonly Lane[],
+  lanes: readonly BootLane[],
   sessions: readonly SessionInfo[],
 ): Promise<{ readonly lines: string[]; readonly failed: boolean }> => {
   const live = new Set(sessions.map((s) => `${s.ref.runtime}:${s.ref.id}`));
@@ -53,7 +54,7 @@ export const driftCheck = async (
   let failed = false;
   for (const lane of lanes) {
     const ref = sessionOf(lane);
-    if (!ref || statusOf(lane) === "closed" || live.has(`${ref.runtime}:${ref.id}`)) continue;
+    if (!ref || finished(lane) || live.has(`${ref.runtime}:${ref.id}`)) continue;
     try {
       if ((await rts.for(ref).probe(ref)).status === "gone") gone.push(lane.key);
     } catch (e) {

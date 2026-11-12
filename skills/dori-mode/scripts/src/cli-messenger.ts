@@ -1,5 +1,5 @@
 /** dori send, presence, inbound and transcribe: the messengers. */
-import { type Command, die, every, slackAuth } from "./cli-context.ts";
+import { type Command, die, envSlackToken, every, slackAuth } from "./cli-context.ts";
 import { Discord, discordPresence } from "./messenger/discord.ts";
 import { fetchHttp, MessengerError, UnsafeMessageError } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
@@ -16,6 +16,8 @@ import { realClock, run } from "./run.ts";
 /** Messenger errors are one line, never a stack. */
 export const messengerErrors = [MessengerError, UnsafeMessageError, TranscriptionError] as const;
 
+const NO_SLACK_TOKEN = "DORI_SLACK_TOKEN is not set (nor DORI_SLACK_TOKEN_FILE)";
+
 const send: Command = async ({ key, need, opt, values, config }) => {
   const platform = key ?? die("send needs slack, telegram or discord");
   const to = need("to");
@@ -27,7 +29,7 @@ const send: Command = async ({ key, need, opt, values, config }) => {
     const slack = new Slack(
       fetchHttp,
       realClock,
-      slackAuth(token("DORI_SLACK_TOKEN")),
+      slackAuth(envSlackToken() ?? die(NO_SLACK_TOKEN)),
       undefined,
       new ThreadLedger(`${config.stateDir}/slack-threads.json`),
     );
@@ -60,7 +62,7 @@ const send: Command = async ({ key, need, opt, values, config }) => {
 const presence: Command = async ({ key }) => {
   if (key === "slack") {
     const auth = {
-      token: process.env["DORI_SLACK_TOKEN"] ?? die("DORI_SLACK_TOKEN is not set"),
+      token: envSlackToken() ?? die(NO_SLACK_TOKEN),
       cookie:
         process.env["DORI_SLACK_COOKIE"] ??
         die("DORI_SLACK_COOKIE is not set (user-token presence needs the d cookie)"),
@@ -135,7 +137,7 @@ const inbound: Command = async ({ key, loopMinutes, config }) => {
   const minutes = loopMinutes();
   if (key === "telegram") return await telegramInbound(config.stateDir, minutes);
   if (key !== "slack") die("inbound supports slack or telegram");
-  const auth = slackAuth(process.env["DORI_SLACK_TOKEN"] ?? die("DORI_SLACK_TOKEN is not set"));
+  const auth = slackAuth(envSlackToken() ?? die(NO_SLACK_TOKEN));
   const ledger = new ThreadLedger(`${config.stateDir}/slack-threads.json`);
   const slack = new Slack(fetchHttp, realClock, auth, undefined, ledger);
   const me = String((await slack.call("auth.test", {}))["user_id"] ?? die("auth.test returned no user_id"));
