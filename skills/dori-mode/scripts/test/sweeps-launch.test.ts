@@ -70,7 +70,7 @@ test("launch reports STARTUP_OK only on a ready agent status that shows a goal; 
   expect(await run("working", ["❯ ", "❯ ", "❯ ", goal], "slow-goal-lane")).toBe("STARTUP_OK slow-goal-lane w:p9");
   expect(await run("idle", "❯ ", "no-goal-lane")).toStartWith("STARTUP_NO_GOAL no-goal-lane w:p9");
   expect(await run("idle", ["❯ ", "❯ ", "usage limit reached\n❯ "], "limit-lane")).toBe(
-    "STARTUP_ERROR limit-lane w:p9: usage limit",
+    "STARTUP_ERROR limit-lane w:p9: usage limit reached",
   );
   // A working agent has not failed: its own output may quote the failure phrases (here, while it reads launch.ts).
   expect(

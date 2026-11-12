@@ -190,7 +190,7 @@ test("on hc, a program that has not reported a status yet is waited for, and one
   const limited = wrap("Error from provider: rate limit reached, retry later", 26);
   expect(limited.split("\n")[0]).toBe("Error from provider: rate");
   expect(await launch("hc-split", { ...atWidth, cols: 26, screen: `${limited}\n$ ` })).toBe(
-    "STARTUP_ERROR hc-split t1: rate limit",
+    "STARTUP_ERROR hc-split t1: rate limit reached",
   );
   // A failure glued onto the end of the extension path by a join still counts, after either tail form.
   const glued = `${exact} imported from /x/extensions/quota-meter/index.jsNo API key found\n$ `;
