@@ -72,6 +72,10 @@ const RULE: readonly (readonly [string, string])[] = [
   ["error: QUOTA_EXCEEDED", "QUOTA_EXCEEDED"],
   ["code=quotaExceeded", "quotaExceeded"],
   ["status: RESOURCE_EXHAUSTED", "RESOURCE_EXHAUSTED"],
+  ["Error: QUOTA_EXCEEDED", "QUOTA_EXCEEDED"],
+  ["ERROR: insufficient_quota", "insufficient_quota"],
+  ["Status: RESOURCE_EXHAUSTED", "RESOURCE_EXHAUSTED"],
+  ["{'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'x'}}", "rate_limit_error"],
   ["usage limit reached.", "usage limit reached"],
   ["Loading providers okNo API key found", "No API key"],
   ["Loading providers okRate limit exceeded", "Rate limit exceeded"],
@@ -109,6 +113,8 @@ const HEALTHY: readonly string[] = [
   "throw { type: 'rate_limit_error', message: 'x' }",
   "errorType: RESOURCE_EXHAUSTED",
   "if (code == 'quota_exceeded') retry()",
+  'throw { type: "rate_limit_error", message: "x" }',
+  "foo_Rate limit exceeded",
   "the userQuota field is set",
   "maxQuota of 10",
   "loaded the quota-meter extension",
@@ -127,6 +133,26 @@ const HEALTHY: readonly string[] = [
   "\u276f \n Pursuing goal (1m)",
 ];
 
+// DECIDED: trade-offs ruled on after six review rounds of this matcher (LEAD, 2026-11-12). Each row says what it reports
+// and why. Changing one is a decision, not a regex fix.
+const DECIDED: readonly (readonly [string, string | null, string])[] = [
+  [
+    "notes in /x/briefs/Quota exceeded handling.md",
+    "Quota exceeded",
+    "a provider phrase glued after a path is caught (/very/long/path/Rate limit exceeded), so a capitalised one inside a path segment alarms too; lane keys and brief names are kebab-case and lower-case",
+  ],
+  [
+    'expect(err.message).toBe("Error: Too Many Requests")',
+    "Error: Too Many Requests",
+    "the printed line is caught wherever it shows; code that quotes it alarms too, and only the 20 s screen and an idle lane with no goal are checked",
+  ],
+  [
+    "dispatch({ status: RESOURCE_EXHAUSTED })",
+    "RESOURCE_EXHAUSTED",
+    "an unquoted key with an unquoted value is how logs print a status field, so the same shape in source alarms too",
+  ],
+];
+
 test("every real tool and provider line reports its phrase", () => {
   for (const [source, text, found] of REAL) expect([source, startupFailure(text)]).toEqual([source, found]);
 });
@@ -137,4 +163,8 @@ test("every rule case reports its phrase", () => {
 
 test("no code, name, path or prose in the corpus is a failure", () => {
   for (const text of HEALTHY) expect([text, startupFailure(text)]).toEqual([text, null]);
+});
+
+test("every decided trade-off reports what was decided", () => {
+  for (const [text, found, why] of DECIDED) expect([text, why, startupFailure(text)]).toEqual([text, why, found]);
 });

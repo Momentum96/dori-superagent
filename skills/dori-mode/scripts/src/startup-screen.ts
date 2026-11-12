@@ -24,7 +24,7 @@ const PHRASES: readonly (readonly [Kind, string])[] = [
   ["anywhere", "model_not_available"],
   ["anywhere", "Session crashed"],
   ["anywhere", "unknown provider"],
-  ["anywhere", "(?:429|Error:|HTTP \\d\\.?\\d?) Too Many Requests"],
+  ["anywhere", "(?:429|Error:) Too Many Requests"],
   ["anywhere", "RESOURCE_EXHAUSTED: Resource exhausted"],
   ["anywhere", "429 status code \\(no body\\)"],
   ["anywhere", "RateLimitError: 4\\d\\d"],
@@ -54,14 +54,18 @@ const standsAlone = (text: string, at: number, found: string): boolean => {
   if (JOINS.test(after) && !(after === "." && !/[a-z0-9_]/i.test(text[at + found.length + 1] ?? ""))) return false;
   const before = text[at - 1] ?? "";
   if (!JOINS.test(before)) return true;
-  return /^[A-Z]/.test(found) && found.includes(" ");
+  // Glued after an identifier character (`foo_Rate limit exceeded`) is a name, never printed text.
+  return before !== "_" && /^[A-Z]/.test(found) && found.includes(" ");
 };
 /**
- * A `value` match counts only as the value of an `error`, `code`, `type` or `status` field as logs and JSON print it:
- * `key: VALUE`, `"key":"VALUE"` or `key=VALUE` with no spaces. The key is a whole lower-case word (`errorType` is
- * not one), and a `= '`, `: '` or `===` is source code (`const code = 'insufficient_quota'`), never a value.
+ * A `value` match counts only as the value of an `error`, `code`, `type` or `status` field as logs, JSON and Python
+ * reprs print it: `Error: VALUE` or `key=VALUE` (unquoted key, unquoted value), `"key": "VALUE"` (JSON) or
+ * `'key': 'VALUE'` (a Python dict repr): the value is quoted only when its key is, with the same quote. The key is a
+ * whole word in any case (`ERROR`, `Status`), never the end of a longer name (`errorType`). An unquoted key with a
+ * quoted value is source code (`throw { type: "rate_limit_error" }`, `const code = 'insufficient_quota'`), never a value.
  */
-const VALUE_KEY = /(?:^|[^A-Za-z0-9_])"?(?:error|code|type|status)"?(?::\s*"?|=)$/;
+const VALUE_KEY =
+  /(?:^|[^A-Za-z0-9_])(?:"(?:error|code|type|status)"\s*:\s*"|'(?:error|code|type|status)'\s*:\s*'|(?:error|code|type|status)(?::\s*|=))$/i;
 const isValue = (text: string, at: number, found: string): boolean =>
   VALUE_KEY.test(text.slice(Math.max(0, at - 24), at)) && !/[a-z0-9_]/i.test(text[at + found.length] ?? "");
 const counts = (kind: Kind, text: string, at: number, found: string): boolean =>
