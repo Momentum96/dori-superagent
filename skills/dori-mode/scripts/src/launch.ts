@@ -1,4 +1,4 @@
-import { fill } from "./config.ts";
+import { configPath, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { laneGoalActive } from "./goal-record.ts";
 import { BRIEF_START, footer, originalBrief, quoteForPane } from "./launch-footer.ts";
@@ -10,6 +10,7 @@ import { Reports } from "./reports.ts";
 import { doneSyntaxErrors } from "./signals.ts";
 import type { BudgetLimits } from "./supervision-observe.ts";
 import { Lessons, renderLessons } from "./lessons.ts";
+import { laneLaunchEnv, TokenFileError } from "./slack-token.ts";
 import { startupFailure } from "./startup-screen.ts";
 import { launchFinished, launchScreen } from "./launch-finished.ts";
 import { isKind } from "../../../../src/runtime/hc/exec.ts";
@@ -150,9 +151,15 @@ const startLane = async (
   await Bun.write(input.brief, preamble);
   const rts = runtimesOf(deps);
   const group = deps.config.laneWorkspace || undefined;
+  let env: Record<string, string>;
+  try {
+    env = laneLaunchEnv(process.env, configPath());
+  } catch (e) {
+    throw e instanceof TokenFileError ? new LaunchError(`token file refused: ${e.message}`) : e;
+  }
   let ref: SessionRef;
   try {
-    const spec = { name: input.key, role: "lane", container: "tab", cwd, env: {} } as const;
+    const spec = { name: input.key, role: "lane", container: "tab", cwd, env } as const;
     ref = await rts.default.create(group === undefined ? spec : { ...spec, group });
   } catch (e) {
     throw new LaunchError(`session create failed: ${e instanceof Error ? e.message : String(e)}`);
