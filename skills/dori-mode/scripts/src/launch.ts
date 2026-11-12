@@ -10,7 +10,9 @@ import { Reports } from "./reports.ts";
 import { doneSyntaxErrors } from "./signals.ts";
 import type { BudgetLimits } from "./supervision-observe.ts";
 import { Lessons, renderLessons } from "./lessons.ts";
-import { startupFailure, startupScreen } from "./startup-screen.ts";
+import { startupFailure } from "./startup-screen.ts";
+import { launchFinished, launchScreen } from "./launch-finished.ts";
+import { isKind } from "../../../../src/runtime/hc/exec.ts";
 
 export type LaunchInput = {
   readonly key: string;
@@ -43,6 +45,7 @@ const launchStatus = async (rts: Runtimes, ref: SessionRef): Promise<{ status?: 
     const probed = (await rts.for(ref).probe(ref)).status;
     return probed === "shell" || probed === "gone" ? { status: probed } : {};
   } catch (e) {
+    if (isKind(e, "not_found")) return { status: "gone" };
     return { error: e instanceof Error ? e.message : String(e) };
   }
 };
@@ -174,10 +177,13 @@ const startLane = async (
   }
   const started = deps.clock.now();
   await deps.clock.sleep(FIRST_CHECK_MS);
-  const screen = await startupScreen(rts, ref);
+  const screen = await launchScreen(deps, rts, ref, input.key);
+  if (screen === null) return { lane, startup: `STARTUP_DONE ${input.key}` };
   const bad = startupFailure(screen);
   if (bad) return { lane, startup: `STARTUP_ERROR ${input.key} ${pane}: ${bad}` };
   const { status, error } = await launchStatus(rts, ref);
+  if (status === "gone" && (await launchFinished(deps, input.key)))
+    return { lane, startup: `STARTUP_DONE ${input.key}` };
   // No status and no lookup error is an agent still starting (a slow host can take minutes, #202): it is waited for in
   // the goal wait. A lookup error, a `shell` or any other status ends the launch below at once.
   if (ready(status) || (unreported(status) && !error)) {
@@ -198,10 +204,14 @@ const startLane = async (
         };
       }
       await deps.clock.sleep(RECHECK_MS);
-      shown = await startupScreen(rts, ref);
+      const nextScreen = await launchScreen(deps, rts, ref, input.key);
+      if (nextScreen === null) return { lane, startup: `STARTUP_DONE ${input.key}` };
+      shown = nextScreen;
       // The goal is only good news while the agent is still running: re-check the status on every re-read.
       const again = await launchStatus(rts, ref);
       current = again.status;
+      if (current === "gone" && (await launchFinished(deps, input.key)))
+        return { lane, startup: `STARTUP_DONE ${input.key}` };
       if (again.error || !(ready(current) || unreported(current))) {
         const lost = again.error
           ? `status lookup failed: ${again.error}`
