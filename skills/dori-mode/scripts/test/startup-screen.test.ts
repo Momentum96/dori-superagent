@@ -41,6 +41,11 @@ const REAL: readonly (readonly [string, string, string])[] = [
     "google.api_core.exceptions.ResourceExhausted: 429 Resource has been exhausted (e.g. check quota).",
     "Resource has been exhausted",
   ],
+  [
+    "grpc status (gemini, vertex)",
+    "8 RESOURCE_EXHAUSTED: Resource exhausted. Please try again later.",
+    "RESOURCE_EXHAUSTED: Resource exhausted",
+  ],
   ["gemini api", "Quota exceeded for quota metric 'Generate Content API requests per minute'", "Quota exceeded"],
   ["claude code", "Claude AI usage limit reached|1700000000", "usage limit reached"],
   ["claude.ai", "You've reached your usage limit.", "reached your usage limit"],
@@ -77,6 +82,12 @@ const RULE: readonly (readonly [string, string])[] = [
   ["Loading providers okQuota Exceeded", "Quota Exceeded"],
   ["Loading providers okUsage limit reached", "Usage limit reached"],
   ["Loading providers ok429 Too Many Requests", "429 Too Many Requests"],
+  // Glued after a pane-wide line that ends in punctuation or a path: still printed text, still a failure.
+  ["Loading providers.....Quota exceeded for quota metric 'x'", "Quota exceeded"],
+  ["------------------------Rate limit reached for gpt-4o", "Rate limit reached"],
+  ["/very/long/path/Rate limit exceeded", "Rate limit exceeded"],
+  ["provider says rate-limit exceeded", "rate-limit exceeded"],
+  ["Error: Too Many Requests", "Error: Too Many Requests"],
 ];
 // HEALTHY: code, names, paths and prose a working lane's screen can show; none is a failure.
 const HEALTHY: readonly string[] = [
@@ -94,6 +105,10 @@ const HEALTHY: readonly string[] = [
   "case 'rate_limit_error':",
   "if (status === 'RESOURCE_EXHAUSTED') backoff()",
   "RATE_LIMIT_EXCEEDED = 1",
+  "const code = 'insufficient_quota';",
+  "throw { type: 'rate_limit_error', message: 'x' }",
+  "errorType: RESOURCE_EXHAUSTED",
+  "if (code == 'quota_exceeded') retry()",
   "the userQuota field is set",
   "maxQuota of 10",
   "loaded the quota-meter extension",

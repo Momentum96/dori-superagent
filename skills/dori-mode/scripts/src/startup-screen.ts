@@ -24,7 +24,8 @@ const PHRASES: readonly (readonly [Kind, string])[] = [
   ["anywhere", "model_not_available"],
   ["anywhere", "Session crashed"],
   ["anywhere", "unknown provider"],
-  ["anywhere", "429 Too Many Requests"],
+  ["anywhere", "(?:429|Error:|HTTP \\d\\.?\\d?) Too Many Requests"],
+  ["anywhere", "RESOURCE_EXHAUSTED: Resource exhausted"],
   ["anywhere", "429 status code \\(no body\\)"],
   ["anywhere", "RateLimitError: 4\\d\\d"],
   ["anywhere", "Resource has been exhausted"],
@@ -32,6 +33,7 @@ const PHRASES: readonly (readonly [Kind, string])[] = [
   ["anywhere", "exceeded your current quota"],
   ["word", "rate limit(?:s)? (?:exceeded|reached|hit)"],
   ["word", "rate limited"],
+  ["word", "rate-limit (?:exceeded|reached)"],
   ["word", "usage limit(?:s)? (?:exceeded|reached|hit)"],
   ["word", "(?:reached|hit) your usage limit"],
   ["word", "quota(?:s)? (?:exceeded|exhausted|reached|hit)"],
@@ -42,19 +44,24 @@ const PATTERNS = PHRASES.map(([kind, source]) => ({ kind, re: new RegExp(source,
 const JOINS = /[a-z0-9_/\\.-]/i;
 /**
  * A `word` match stands alone when nothing in JOINS touches its end (a `.` only when a word goes on: `reached.` ends a
- * sentence, `limited.md` is a file), and nothing touches its start, except when a join glued it onto a pane-wide line.
- * Then it must read as printed text: it starts with a capital and has a space (`...okRate limit reached`), which
- * camelCase (`onRateLimitExceeded`) never is.
+ * sentence, `limited.md` is a file), and nothing touches its start, except when a join glued it onto a pane-wide line,
+ * whatever that line ended in (`ok`, `....`, `----`, a path). Then it must read as printed text: it starts with a
+ * capital and has a space (`...okRate limit reached`), which camelCase (`onRateLimitExceeded`) and lower-case names
+ * (`fix-rate-limit-error`) never are.
  */
 const standsAlone = (text: string, at: number, found: string): boolean => {
   const after = text[at + found.length] ?? "";
   if (JOINS.test(after) && !(after === "." && !/[a-z0-9_]/i.test(text[at + found.length + 1] ?? ""))) return false;
   const before = text[at - 1] ?? "";
   if (!JOINS.test(before)) return true;
-  return /[a-z0-9]/i.test(before) && /^[A-Z]/.test(found) && found.includes(" ");
+  return /^[A-Z]/.test(found) && found.includes(" ");
 };
-/** A `value` match counts only as the value of an error, code, type or status field. */
-const VALUE_KEY = /(?:error|code|type|status)["']?\s*(?:[:=]|=(?!=))\s*["']?$/i;
+/**
+ * A `value` match counts only as the value of an `error`, `code`, `type` or `status` field as logs and JSON print it:
+ * `key: VALUE`, `"key":"VALUE"` or `key=VALUE` with no spaces. The key is a whole lower-case word (`errorType` is
+ * not one), and a `= '`, `: '` or `===` is source code (`const code = 'insufficient_quota'`), never a value.
+ */
+const VALUE_KEY = /(?:^|[^A-Za-z0-9_])"?(?:error|code|type|status)"?(?::\s*"?|=)$/;
 const isValue = (text: string, at: number, found: string): boolean =>
   VALUE_KEY.test(text.slice(Math.max(0, at - 24), at)) && !/[a-z0-9_]/i.test(text[at + found.length] ?? "");
 const counts = (kind: Kind, text: string, at: number, found: string): boolean =>
