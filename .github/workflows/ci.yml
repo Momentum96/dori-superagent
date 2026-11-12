@@ -74,11 +74,11 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
-      - name: Install hc 0.1.17
+      - name: Install hc 0.1.20
         run: |
-          curl -fsSL https://releases.herdr.dev/core/install.sh | HC_VERSION=0.1.17 sh
+          curl -fsSL https://releases.herdr.dev/core/install.sh | HC_VERSION=0.1.20 sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - run: hc update --version 0.1.17
+      - run: hc update --version 0.1.20
       - run: hc --version
       - name: hc e2e (skipped only while the test file does not exist)
         run: |
