@@ -54,8 +54,9 @@ const isApp = (word: string, app: string): boolean => word === app || word.start
 
 /**
  * True when some process positively names the agent `app` (the name the program reported for itself): its executable is
- * `app` or `app-<suffix>` (a platform build), or it is a shell running a command (`sh -c '. "$0"' DIR/app-x.sh`) with a
- * path operand after the command flag named that way. Any other program's arguments never count (`vim notes/omo.md`).
+ * `app` or `app-<suffix>` (a platform build), or it is a shell running a command that expands `$0` (`sh -c '. "$0"'
+ * DIR/app-x.sh`) whose `$0`, the first path operand after that command, is named that way. Any other program's arguments
+ * never count, a shell command's included (`vim notes/omo.md`, `sh -c tail -f /var/log/omo-1.log`).
  * For a foreground the runtime did not name (#209): a stale report must not deliver into whatever runs in front now.
  */
 export function namesAgent(processes: readonly ForegroundProcess[], app: string): boolean {
@@ -65,6 +66,8 @@ export function namesAgent(processes: readonly ForegroundProcess[], app: string)
     const name = baseName(proc.name);
     const flag = proc.argv.findIndex((a, i) => i > 0 && runsCommand(name, a));
     if (!SHELLS.has(name) || flag < 0) return false;
-    return proc.argv.slice(flag + 1).some((a) => a.includes("/") && isApp(stem(a), want));
+    const zero = proc.argv.findLastIndex((a, i) => i > flag && a.includes("$0"));
+    const script = zero < 0 ? undefined : proc.argv.slice(zero + 1).find((a) => a.includes("/"));
+    return script !== undefined && isApp(stem(script), want);
   });
 }

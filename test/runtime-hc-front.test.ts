@@ -73,6 +73,18 @@ describe("hc foreground missing: the OS process table must show the agent in fro
     expect(fake.calls.some((c) => c[0] === "send")).toBe(false);
   });
 
+  test.each([
+    ["a shell command that only edits a file named like the app", "sh -c vim /w/omo.md"],
+    ["a shell command that only reads a log named like a platform build", "sh -c tail -f /var/log/omo-2026.log"],
+  ])("%s: no-agent, nothing typed", async (_, args) => {
+    const { fake, rt } = shown(
+      table("  900   900   980 ttys010  /bin/zsh", `  980   980   980 ttys010  ${args}`),
+      "omo",
+    );
+    expect(await rt.deliver(T1, "secret text")).toEqual({ kind: "no-agent" });
+    expect(fake.calls.some((c) => c[0] === "send")).toBe(false);
+  });
+
   test("the probe carries the group it read", async () => {
     const { rt } = shown(table("  900   900   950 ttys010  /bin/zsh", `  950   950   950 ttys010  ${FIXTURE}`));
     const p = await rt.probe(T1);
