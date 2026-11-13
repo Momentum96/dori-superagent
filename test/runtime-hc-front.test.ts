@@ -76,6 +76,8 @@ describe("hc foreground missing: the OS process table must show the agent in fro
   test.each([
     ["a shell command that only edits a file named like the app", "sh -c vim /w/omo.md"],
     ["a shell command that only reads a log named like a platform build", "sh -c tail -f /var/log/omo-2026.log"],
+    ["a shell command that only edits the file $0 names", 'sh -c vim "$0" /w/omo.md'],
+    ["a shell command that only prints the path $0 names", "sh -c echo $0 /w/omo-x.sh"],
   ])("%s: no-agent, nothing typed", async (_, args) => {
     const { fake, rt } = shown(
       table("  900   900   980 ttys010  /bin/zsh", `  980   980   980 ttys010  ${args}`),
