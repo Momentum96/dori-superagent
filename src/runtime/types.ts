@@ -30,6 +30,8 @@ export type Probe = {
   readonly foreground?: readonly ForegroundProcess[];
   /** The agent's goal status read from the agent itself (omo-host: `active`, `paused`, ..., `none`); undefined = read the screen. */
   readonly goal?: string;
+  /** omo-host: the agent waits on a person (a question, a dialog, `lifecycle.waitingOn.human`); absent otherwise. */
+  readonly waitingOnHuman?: true;
 };
 export type SessionInfo = {
   readonly ref: SessionRef;

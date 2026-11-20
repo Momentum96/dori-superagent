@@ -15,6 +15,10 @@ export type LeadState = {
   readonly state: "active" | "switching";
   readonly retired: readonly string[];
   readonly cwd: string;
+  /** How `dori lead open` gave the lead its rules; a first prompt does not survive compaction, so the pump re-sends it. */
+  readonly rules?: "project-file" | "first-prompt";
+  /** The rules file the lead re-reads on a `sys:rules-refresh` item. */
+  readonly rulesFile?: string;
 };
 
 export class LeadStateError extends Error {}
@@ -44,6 +48,9 @@ export const parseLeadState = (raw: unknown): LeadState => {
   } catch (e) {
     throw new LeadStateError((e as Error).message);
   }
+  const rules = o["rules"];
+  if (rules !== undefined && rules !== "project-file" && rules !== "first-prompt")
+    throw new LeadStateError(`lead state rules must be project-file or first-prompt, not ${JSON.stringify(rules)}`);
   return {
     bot,
     runtime: nonEmpty(o, "runtime"),
@@ -52,6 +59,8 @@ export const parseLeadState = (raw: unknown): LeadState => {
     state,
     retired,
     cwd: nonEmpty(o, "cwd"),
+    ...(rules === undefined ? {} : { rules }),
+    ...(o["rulesFile"] === undefined ? {} : { rulesFile: nonEmpty(o, "rulesFile") }),
   };
 };
 

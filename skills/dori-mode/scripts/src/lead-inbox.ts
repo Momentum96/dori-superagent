@@ -4,11 +4,12 @@
  * SQLite rather than a jsonl journal (reports.ts) because several writers need id uniqueness and crash-safe order.
  * Not the pane message queue in src/inbox*.ts.
  */
-import { Database, SQLiteError } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { type Envelope, LeadInboxError, parseBot, parseEnvelope } from "./lead-envelope.ts";
+import { openInboxDb } from "./lead-inbox-db.ts";
 import { type Clock, iso } from "./run.ts";
 
 export type LeadItemState = "queued" | "sent" | "ambiguous" | "done";
@@ -63,39 +64,6 @@ const item = (r: Row): LeadItem => ({
   ...(r.message === null ? {} : { message: r.message }),
 });
 
-const SCHEMA = `CREATE TABLE IF NOT EXISTS items(
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  id TEXT UNIQUE NOT NULL,
-  kind TEXT,
-  source TEXT,
-  body TEXT,
-  state TEXT CHECK(state IN ('queued','sent','ambiguous','done')),
-  generation INTEGER,
-  created_at TEXT,
-  sent_at TEXT,
-  attempts INTEGER DEFAULT 0,
-  accepted INTEGER DEFAULT 0,
-  channel TEXT,
-  message TEXT)`;
-
-const WAL_SWITCH_MS = 10_000;
-
-// The switch to WAL takes an exclusive lock and SQLite answers SQLITE_BUSY at once, without the busy handler, while
-// another process is opening the same new file. WAL is stored in the file, so the first switch that lands is enough.
-const enableWal = (db: Database): void => {
-  const deadline = Date.now() + WAL_SWITCH_MS;
-  for (;;) {
-    try {
-      const row = db.query("PRAGMA journal_mode = WAL").get() as { journal_mode: string } | null;
-      if (row?.journal_mode === "wal") return;
-    } catch (e) {
-      if (!(e instanceof SQLiteError && e.code === "SQLITE_BUSY")) throw e;
-    }
-    if (Date.now() > deadline) throw new Error("lead inbox: could not switch the database to WAL within 10 s");
-    Bun.sleepSync(20);
-  }
-};
-
 export const leadInboxPath = (stateDir: string, bot: string): string =>
   join(stateDir, "lead-inbox", `${parseBot(bot)}.sqlite`);
 
@@ -109,10 +77,7 @@ export class LeadInbox {
   ) {
     const path = leadInboxPath(stateDir, bot);
     mkdirSync(join(stateDir, "lead-inbox"), { recursive: true });
-    this.db = new Database(path, { create: true, strict: true });
-    this.db.run("PRAGMA busy_timeout = 10000");
-    enableWal(this.db);
-    this.db.run(SCHEMA);
+    this.db = openInboxDb(path);
   }
 
   /**
@@ -180,6 +145,56 @@ export class LeadInbox {
     return this.db.transaction(() =>
       seqs.reduce((n, seq) => n + update.run(state === "sent" ? { state, at, seq } : { state, seq }).changes, 0),
     )();
+  }
+
+  private each(sql: string, seqs: readonly number[], params: Record<string, string | number> = {}): number {
+    const update = this.db.query(sql);
+    return this.db.transaction(() => seqs.reduce((n, seq) => n + update.run({ ...params, seq }).changes, 0))();
+  }
+
+  /**
+   * The pump's batch, taken and marked in one immediate transaction so an edit (put with replaces) lands either before
+   * it, and the lead gets the new body, or after it, as its own item: `sys:` items first, then nextBatch, each moved
+   * to sent for `generation` (sent_at stamped) only while still queued. The rows as read; no attempt is counted yet.
+   */
+  take(maxItems: number, maxBytes: number, generation: number): LeadItem[] {
+    const sent = this.db.query(
+      "UPDATE items SET state = 'sent', sent_at = $at, generation = $g WHERE seq = $seq AND state = 'queued'",
+    );
+    return this.db
+      .transaction((): LeadItem[] => {
+        const sys = this.list("queued").filter((i) => i.id.startsWith("sys:"));
+        const rest = this.nextBatch(maxItems, maxBytes).filter((i) => !sys.some((s) => s.seq === i.seq));
+        const at = iso(this.clock);
+        return [...sys, ...rest]
+          .slice(0, maxItems)
+          .filter((i) => sent.run({ at, g: generation, seq: i.seq }).changes === 1);
+      })
+      .immediate();
+  }
+
+  /** The pump is about to call the lead with these items: one more attempt each. */
+  attempted(seqs: readonly number[]): number {
+    return this.each("UPDATE items SET attempts = attempts + 1 WHERE seq = $seq", seqs);
+  }
+
+  /** Back to queued, unsent; `counted`: the call was made but never reached the lead (busy, host down), so uncount it. */
+  release(seqs: readonly number[], counted = false): number {
+    const sql =
+      "UPDATE items SET state = 'queued', attempts = MAX(attempts - $d, 0) WHERE seq = $seq AND state = 'sent'";
+    return this.each(sql, seqs, { d: counted ? 1 : 0 });
+  }
+
+  /** The lead has the items: done and accepted. */
+  accept(seqs: readonly number[]): number {
+    return this.each("UPDATE items SET state = 'done', accepted = 1 WHERE seq = $seq", seqs);
+  }
+
+  /** Done items sent to a generation older than `generation` at or after `since`: queued again for the new lead. */
+  requeueOlder(generation: number, since: string): number {
+    return this.db
+      .query("UPDATE items SET state = 'queued' WHERE state = 'done' AND generation < $g AND sent_at >= $since")
+      .run({ g: generation, since }).changes;
   }
 
   /** An edit before delivery replaces the body; once the item left queued the lead already has it, so false. */

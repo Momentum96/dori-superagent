@@ -11,6 +11,8 @@ export type Hooks = {
   readonly threadReply?: ArgvTemplate;
   readonly threadDone?: ArgvTemplate;
   readonly transcribe?: ArgvTemplate;
+  /** Run once per lead-inbox item the lead accepted: {id} {kind} {source} {channel} {message} (the last two empty off Discord). */
+  readonly inboxAccepted?: ArgvTemplate;
 };
 
 export type GuardThresholds = {
