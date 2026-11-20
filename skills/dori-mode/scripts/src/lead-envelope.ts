@@ -7,6 +7,8 @@ export type Envelope = {
   readonly body: string;
   readonly channel?: string;
   readonly message?: string;
+  /** An edit names the item it corrects; put rewrites that item instead when it is still queued. */
+  readonly replaces?: string;
 };
 /** Input the inbox refuses: the CLI reports it in one line and exits 2. */
 export class LeadInboxError extends Error {}
@@ -28,15 +30,20 @@ const text = (value: unknown, field: string): string => {
 const optional = (value: unknown, field: string): string | undefined =>
   value === undefined || value === null ? undefined : text(value, field);
 
+const inboxId = (value: string, field: string): string => {
+  if (!ID.test(value)) throw new LeadInboxError(`invalid ${field} "${value}": must match ${ID.source}`);
+  return value;
+};
+
 export const parseEnvelope = (raw: unknown): Envelope => {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw))
     throw new LeadInboxError("envelope must be a JSON object");
   const o = raw as Readonly<Record<string, unknown>>;
-  const id = text(o["id"], "id");
-  if (!ID.test(id)) throw new LeadInboxError(`invalid id "${id}": must match ${ID.source}`);
+  const id = inboxId(text(o["id"], "id"), "id");
   if (typeof o["body"] !== "string") throw new LeadInboxError("envelope body must be a string");
   const channel = optional(o["channel"], "channel");
   const message = optional(o["message"], "message");
+  const replaces = optional(o["replaces"], "replaces");
   return {
     id,
     kind: text(o["kind"], "kind"),
@@ -44,5 +51,6 @@ export const parseEnvelope = (raw: unknown): Envelope => {
     body: o["body"],
     ...(channel === undefined ? {} : { channel }),
     ...(message === undefined ? {} : { message }),
+    ...(replaces === undefined ? {} : { replaces: inboxId(replaces, "replaces") }),
   };
 };
