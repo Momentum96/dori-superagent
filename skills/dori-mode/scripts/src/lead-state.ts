@@ -19,7 +19,11 @@ export type LeadState = {
   readonly rules?: "project-file" | "first-prompt";
   /** The rules file the lead re-reads on a `sys:rules-refresh` item. */
   readonly rulesFile?: string;
+  /** Closes the host refused (`closed:false`) while `dori lead replace` retired a session; that id is never named again. */
+  readonly closeFailures?: readonly CloseFailure[];
 };
+
+export type CloseFailure = { readonly id: string; readonly at: string; readonly answer: string };
 
 export class LeadStateError extends Error {}
 
@@ -27,6 +31,12 @@ const nonEmpty = (o: Readonly<Record<string, unknown>>, field: string): string =
   const value = o[field];
   if (typeof value !== "string" || value === "") throw new LeadStateError(`lead state ${field} must be a string`);
   return value;
+};
+
+const isCloseFailure = (v: unknown): v is CloseFailure => {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+  const o = v as Readonly<Record<string, unknown>>;
+  return [o["id"], o["at"], o["answer"]].every((s) => typeof s === "string" && s !== "");
 };
 
 export const parseLeadState = (raw: unknown): LeadState => {
@@ -51,6 +61,9 @@ export const parseLeadState = (raw: unknown): LeadState => {
   const rules = o["rules"];
   if (rules !== undefined && rules !== "project-file" && rules !== "first-prompt")
     throw new LeadStateError(`lead state rules must be project-file or first-prompt, not ${JSON.stringify(rules)}`);
+  const closeFailures = o["closeFailures"];
+  if (closeFailures !== undefined && !(Array.isArray(closeFailures) && closeFailures.every(isCloseFailure)))
+    throw new LeadStateError("lead state closeFailures must be a list of {id, at, answer} strings");
   return {
     bot,
     runtime: nonEmpty(o, "runtime"),
@@ -61,6 +74,9 @@ export const parseLeadState = (raw: unknown): LeadState => {
     cwd: nonEmpty(o, "cwd"),
     ...(rules === undefined ? {} : { rules }),
     ...(o["rulesFile"] === undefined ? {} : { rulesFile: nonEmpty(o, "rulesFile") }),
+    ...(closeFailures === undefined
+      ? {}
+      : { closeFailures: closeFailures.map(({ id, at, answer }) => ({ id, at, answer })) }),
   };
 };
 

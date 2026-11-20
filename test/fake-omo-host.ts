@@ -51,6 +51,8 @@ export class FakeOmoHost {
   /** `host status`: the running host's pid and start time. `down`: status unreachable, every session verb host_unavailable. */
   status = { pid: 4242, processStartTime: "Fri Nov 20 00:47:34 2026 UTC" };
   down = false;
+  /** Sessions whose close answers `closed:false` and stay open, as a session resumed after a host restart did (spike S1 f). */
+  readonly refusesClose = new Set<string>();
   /** Where opened sessions' files live (a temp dir in tests that read goal records). */
   constructor(private readonly sessionsDir = "/nonexistent/sessions") {}
 
@@ -99,7 +101,15 @@ export class FakeOmoHost {
     if (verb === "open") {
       const id = `00000000-0000-4000-8000-${String(this.sessions.size + 1).padStart(12, "0")}`;
       const name = flag(args, "--name");
-      this.add({ id, cwd: flag(args, "--cwd") ?? "/", ...(name === undefined ? {} : { name }) });
+      const [model, prompt] = [flag(args, "--model"), flag(args, "--prompt")];
+      const [provider, modelId] = model?.split("/") ?? [];
+      this.add({
+        id,
+        cwd: flag(args, "--cwd") ?? "/",
+        ...(name === undefined ? {} : { name }),
+        entries: prompt === undefined ? [] : [{ type: "message", message: { role: "user", content: prompt } }],
+        state: model === undefined ? {} : { model: { provider, id: modelId } },
+      });
       return ok({ action: "open", sessionId: "rpc-1", durableSessionId: id, socket: SOCKET });
     }
     if (verb === "list") {
@@ -150,6 +160,7 @@ export class FakeOmoHost {
         return ok({ action: "abort", acknowledged: true, aborted });
       }
       case "close":
+        if (this.refusesClose.has(s.id)) return ok({ action: "close", closed: false, attachments: 1 });
         s.parked = true;
         return ok({ action: "close", closed: true });
       default:
