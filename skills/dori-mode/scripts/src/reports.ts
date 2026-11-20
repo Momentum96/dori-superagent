@@ -62,8 +62,8 @@ export const reportState = (kind: ReportKind): ProgressState => {
 };
 
 // The printed line goes to terminals, so escape sequences and other control characters are dropped from it (a CR or
-// newline becomes one space); the journal keeps the raw text.
-export const reportLine = (report: Report): string =>
+// newline becomes one space); the journal keeps the raw text. A stalled activity is printed the same way, as kind stalled.
+export const reportLine = (report: Pick<Report, "key" | "text"> & { readonly kind: ReportKind | "stalled" }): string =>
   `[REPORT] ${report.key} | ${report.kind} | ${Bun.stripANSI(report.text)
     .replace(/\s*[\r\n]+\s*/g, " ")
     // biome-ignore lint/suspicious/noControlCharactersInRegex: the pattern deliberately matches control characters to reject or strip them

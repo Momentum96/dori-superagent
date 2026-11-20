@@ -1,4 +1,4 @@
-/** dori sync, boot, verify-pr and the host loops: watch, freshness, dead-panes, guard, heavy, can-launch. */
+/** dori sync, boot, verify-pr and the host loops: watch, freshness, forward-reports, dead-panes, guard, heavy, can-launch. */
 import { dirname, join } from "node:path";
 import { bootCheck, envSlackCheck } from "./boot.ts";
 import { gatewayCheck } from "./boot-gateway.ts";
@@ -11,6 +11,8 @@ import { guardTick, sampleHost } from "./host-guard.ts";
 import { Gateway, gatewaySocketPath, unixConnector } from "./messenger/gateway.ts";
 import { fetchHttp } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
+import { ConfigError } from "./config.ts";
+import { forwarderDeps, forwardTick } from "./report-forwarder.ts";
 import { Reports } from "./reports.ts";
 import { canLaunch } from "./routing.ts";
 import { realClock, run } from "./run.ts";
@@ -86,6 +88,8 @@ const heavy: Command = async ({ rest, config }) => {
   }
 };
 
+const FORWARD_EVERY_MS = 15_000;
+
 export const opsCommands: Readonly<Record<string, Command>> = {
   sync,
   boot,
@@ -103,6 +107,25 @@ export const opsCommands: Readonly<Record<string, Command>> = {
       for (const a of await freshnessTick(deps, process.env["HOME"] ?? ""))
         console.log(`${a.kind.toUpperCase()} ${a.lane} ${a.detail}`);
     });
+  },
+  "forward-reports": async ({ values, config, deps }) => {
+    const forwarder = (() => {
+      try {
+        return forwarderDeps(config, deps.run, deps.registry);
+      } catch (e) {
+        if (e instanceof ConfigError) return die(e.message);
+        throw e;
+      }
+    })();
+    for (;;) {
+      const acts = await forwardTick(forwarder).catch((e: unknown) => {
+        if (values["once"]) throw e;
+        return [{ kind: "failed", lane: "-", detail: e instanceof Error ? e.message : String(e) }];
+      });
+      for (const a of acts) console.log(`${a.kind.toUpperCase()} ${a.lane} ${a.detail}`);
+      if (values["once"]) process.exit(acts.some((a) => a.kind === "failed") ? 1 : 0);
+      await realClock.sleep(FORWARD_EVERY_MS);
+    }
   },
   "dead-panes": async ({ loopMinutes, config }) => {
     const seen = new Set<string>();

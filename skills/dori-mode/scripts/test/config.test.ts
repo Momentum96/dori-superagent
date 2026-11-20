@@ -110,3 +110,30 @@ test("hook templates fill each argument separately, so text with spaces or quote
   });
   expect(argv).toEqual(["notify", "--thread", "chat:1/2", "--text", `it's "done"; rm -rf /`]);
 });
+
+test("leadInbox, leadInboxArgv and machine load when well formed and stop the load with their name otherwise", async () => {
+  const path = join(state.dir, "config.json");
+  const argv = [
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "gwjeon@100.116.134.97",
+    "/Users/gwjeon/.local/share/dori/dori-inbox-drop",
+    "omo",
+  ];
+  await Bun.write(path, JSON.stringify({ leadInbox: true, leadInboxArgv: argv, machine: "omarchy" }));
+  expect(await loadConfig(path, "/home/ana")).toMatchObject({
+    leadInbox: true,
+    leadInboxArgv: argv,
+    machine: "omarchy",
+  });
+  for (const [bad, name] of [
+    [{ leadInbox: "yes" }, "leadInbox"],
+    [{ leadInboxArgv: [] }, "leadInboxArgv"],
+    [{ leadInboxArgv: "ssh macmini" }, "leadInboxArgv"],
+    [{ leadInboxArgv: ["ssh", ""] }, "leadInboxArgv"],
+  ] as const) {
+    await Bun.write(path, JSON.stringify(bad));
+    await expect(loadConfig(path, "/home/ana")).rejects.toThrow(new RegExp(`invalid ${name}:`));
+  }
+});

@@ -45,12 +45,27 @@ export const leadSendArgv = (kind: string | undefined, leadPane: string): readon
         ? ["herdr", "pane", "run", leadPane]
         : undefined;
 
+/**
+ * How a lane's report reaches the lead: "inbox" when the lead reads a lead inbox (an omo-host lead, or `leadInbox`),
+ * where `dori report` alone delivers and the lane names no lead session; else the send argv, if the runtime has one.
+ */
+export type LeadReach = "inbox" | readonly string[] | undefined;
+export const leadReach = (kind: string | undefined, leadPane: string, leadInbox = false): LeadReach =>
+  kind === "omo-host" || leadInbox ? "inbox" : leadSendArgv(kind, leadPane);
+
+const deliverLine = (leadPane: string, reach: LeadReach): string =>
+  reach === "inbox"
+    ? `\`dori report\` 한 번이면 리드에게 전달된다. 출력된 줄을 어디에도 보내지 말 것.`
+    : reach
+      ? `send that line to the lead as this argv array (the line as its last element), never a shell string: ${JSON.stringify([...reach, "[REPORT] ..."])}`
+      : `send that line to pane ${leadPane || "(lead pane)"} as an argv array, never a shell string`;
+
 export const footer = (
   lane: Lane,
   leadPane: string,
   identities: DoriConfig["repoIdentities"] = {},
   cli: string = CLI,
-  leadSend: readonly string[] | undefined = undefined,
+  reach: LeadReach = undefined,
 ): string =>
   [
     "",
@@ -58,7 +73,12 @@ export const footer = (
     FOOTER_HEADING,
     `- Key: ${lane.key}. Work thread: ${lane.thread}.`,
     `- Done = ${lane.done}. The lane closes only when every signal reads back live.`,
-    `- Persist each milestone, blocker, question, halt and completion with ${cli} report ${lane.key} --kind milestone|blocker|question|halted|done --text "what, with evidence links". It appends reports.jsonl and prints the human [REPORT] line; ${leadSend ? `send that line to the lead as this argv array (the line as its last element), never a shell string: ${JSON.stringify([...leadSend, "[REPORT] ..."])}` : `send that line to pane ${leadPane || "(lead pane)"} as an argv array, never a shell string`}.`,
+    `- Persist each milestone, blocker, question, halt and completion with ${cli} report ${lane.key} --kind milestone|blocker|question|halted|done --text "what, with evidence links". It appends reports.jsonl and prints the human [REPORT] line; ${deliverLine(leadPane, reach)}`,
+    ...(reach === "inbox"
+      ? [
+          `- 질문 도구(question tool)는 쓰지 말 것: 답을 기다리는 질문은 리드에게 보이지 않는다. 막히거나 소유자의 답이 필요하면 ${cli} report ${lane.key} --kind question|blocker --text "..." 로 남긴다.`,
+        ]
+      : []),
     ...(Object.keys(identities).length
       ? [
           "- Before committing, set the repository's identity below for that command only; never change the global Git identity. For a repository not listed, ask the lead for its identity before the first commit.",
