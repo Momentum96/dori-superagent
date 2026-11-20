@@ -4,14 +4,14 @@ import { join } from "node:path";
 
 import { type Cli, type Command, die } from "./cli-context.ts";
 import { LeadInboxError, parseEnvelope } from "./lead-envelope.ts";
-import { isLeadItemState, LeadInbox } from "./lead-inbox.ts";
+import { isLeadItemState, LeadInbox, type PutOutcome } from "./lead-inbox.ts";
 import { type Clock, realClock } from "./run.ts";
 
 const SPOOL_EVERY_MS = 2_000;
 
 type SpoolResult = {
   readonly file: string;
-  readonly outcome: "inserted" | "duplicate" | "rejected";
+  readonly outcome: PutOutcome | "rejected";
   readonly why?: string;
 };
 
@@ -29,7 +29,7 @@ export const importSpool = (inbox: LeadInbox, dir: string): SpoolResult[] => {
   const results: SpoolResult[] = [];
   for (const { name } of files) {
     const path = join(dir, name);
-    let outcome: "inserted" | "duplicate";
+    let outcome: PutOutcome;
     try {
       outcome = inbox.put(parseEnvelope(JSON.parse(readFileSync(path, "utf8"))));
     } catch (e) {

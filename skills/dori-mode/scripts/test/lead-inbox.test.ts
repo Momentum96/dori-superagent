@@ -80,6 +80,66 @@ test("two processes putting 200 distinct ids each at once leave 400 rows and no 
     inbox.close();
   }));
 
+test("an edit racing the pump's move to sent either rewrites the queued original or lands as its own item", () =>
+  inState(async (dir) => {
+    const module = join(import.meta.dir, "../src/lead-inbox.ts");
+    const setup = new LeadInbox(dir, "omo", fixedClock());
+    for (let i = 0; i < 200; i++) setup.put(ev(`d:${i}`, "old"));
+    setup.close();
+    const child = (body: string) =>
+      run(
+        [
+          process.execPath,
+          "-e",
+          `const { LeadInbox } = await import(${JSON.stringify(module)});
+           const inbox = new LeadInbox(${JSON.stringify(dir)}, "omo", { now: () => Date.now(), sleep: async () => {} });
+           ${body}
+           inbox.close();`,
+        ],
+        { timeoutMs: 60_000 },
+      );
+    const [pump, editor] = await Promise.all([
+      child("for (let seq = 1; seq <= 200; seq++) inbox.mark([seq], 'sent');"),
+      child(
+        "console.log(JSON.stringify(Array.from({ length: 200 }, (_, i) => inbox.put({ id: 'e:' + i, kind: 'edit', source: 't', body: 'new', replaces: 'd:' + i }))));",
+      ),
+    ]);
+    expect([pump.code, pump.err, editor.code, editor.err]).toEqual([0, "", 0, ""]);
+    const answers = JSON.parse(editor.out) as string[];
+    const inbox = new LeadInbox(dir, "omo", fixedClock());
+    const byId = new Map(inbox.list().map((i) => [i.id, i]));
+    const outcomes = answers.map((answer, i) => {
+      const original = byId.get(`d:${i}`);
+      const edit = byId.get(`e:${i}`);
+      return answer === "replaced"
+        ? [original?.state, original?.body, edit === undefined]
+        : [original?.state, original?.body, edit?.state, edit?.body];
+    });
+    for (const [i, outcome] of outcomes.entries())
+      expect([i, outcome]).toEqual([
+        i,
+        answers[i] === "replaced" ? ["sent", "new", true] : ["sent", "old", "queued", "new"],
+      ]);
+    expect(answers.every((a) => a === "replaced" || a === "inserted")).toBe(true);
+    inbox.close();
+  }));
+
+test("a replayed edit that already landed as its own item stays a duplicate when the original goes back to queued", () =>
+  inState((dir) => {
+    const inbox = new LeadInbox(dir, "omo", fixedClock());
+    inbox.put(ev("d:5", "old"));
+    inbox.mark([1], "sent");
+    const edit = { ...ev("e:5:1", "new"), kind: "edit", replaces: "d:5" };
+    expect(inbox.put(edit)).toBe("inserted");
+    inbox.mark([1], "queued");
+    expect(inbox.put(edit)).toBe("duplicate");
+    expect(inbox.list().map((i) => [i.id, i.state, i.body])).toEqual([
+      ["d:5", "queued", "old"],
+      ["e:5:1", "queued", "new"],
+    ]);
+    inbox.close();
+  }));
+
 test("replaceBody works while queued and is refused once the item was sent; sent stamps time and attempts", () =>
   inState((dir) => {
     const clock = fixedClock();
@@ -110,6 +170,9 @@ test("malformed envelopes and bot names are refused before anything is written",
       { ...ev("d:1"), source: 3 },
       { ...ev("d:1"), body: null },
       { ...ev("d:1"), channel: "" },
+      { ...ev("d:1"), replaces: "bad id" },
+      { ...ev("d:1"), replaces: "" },
+      { ...ev("d:1"), replaces: 7 },
       ["d:1"],
       null,
       "d:1",

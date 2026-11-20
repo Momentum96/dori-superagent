@@ -12,6 +12,7 @@ import { type Envelope, LeadInboxError, parseBot, parseEnvelope } from "./lead-e
 import { type Clock, iso } from "./run.ts";
 
 export type LeadItemState = "queued" | "sent" | "ambiguous" | "done";
+export type PutOutcome = "inserted" | "duplicate" | "replaced";
 export type LeadItem = Envelope & {
   readonly seq: number;
   readonly state: LeadItemState;
@@ -114,9 +115,24 @@ export class LeadInbox {
     this.db.run(SCHEMA);
   }
 
-  /** INSERT OR IGNORE: an id already present, in any state, is a duplicate and its row is left as it was. */
-  put(envelope: Envelope): "inserted" | "duplicate" {
+  /**
+   * INSERT OR IGNORE: an id already present, in any state, is a duplicate and its row is left as it was. An envelope
+   * whose `replaces` names an item still queued rewrites that item's body instead and answers replaced (the lead has
+   * not seen it, so it gets one item with the latest text); once that item left queued the edit is inserted as its own
+   * item. One immediate transaction, so a pump moving the original to sent sees either the old or the new body.
+   */
+  put(envelope: Envelope): PutOutcome {
     const e = parseEnvelope(envelope);
+    return this.db
+      .transaction((): PutOutcome => {
+        const known = this.db.query("SELECT 1 FROM items WHERE id = $id").get({ id: e.id }) !== null;
+        if (!known && e.replaces !== undefined && this.replaceBody(e.replaces, e.body)) return "replaced";
+        return this.insert(e);
+      })
+      .immediate();
+  }
+
+  private insert(e: Envelope): "inserted" | "duplicate" {
     const changes = this.db
       .query(
         `INSERT OR IGNORE INTO items(id, kind, source, body, state, created_at, channel, message)

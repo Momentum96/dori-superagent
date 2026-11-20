@@ -64,6 +64,62 @@ test("dori lead-inbox put --envelope stores channel and message; a broken envelo
   }
 });
 
+test("an edit with replaces rewrites a still-queued original, adds a row once it was sent, inserts for an unknown id", async () => {
+  const state = withState();
+  try {
+    const put = ["lead-inbox", "put", "--bot", "omo", "--envelope"];
+    const request = (n: number, content: string) => ({
+      id: `d:omo:13000000000000000${n}`,
+      kind: "request",
+      source: "discord",
+      body: JSON.stringify({ content }),
+      channel: "c1",
+      message: `13000000000000000${n}`,
+    });
+    const edit = (n: number, content: string, replaces = request(n, "").id) => ({
+      ...request(n, content),
+      id: `e:omo:13000000000000000${n}:176365000000${n}`,
+      kind: "edit",
+      replaces,
+    });
+    const send = async (envelope: object) => {
+      const r = await dori(state.dir, put, JSON.stringify(envelope));
+      return [r.code, r.out, r.err];
+    };
+    const content = (body: string | undefined) => (JSON.parse(body ?? "null") as { content: string }).content;
+
+    // The gate review's repro: request, edit while queued, replay of the request.
+    expect(await send(request(1, "old"))).toEqual([0, "inserted", ""]);
+    expect(await send(edit(1, "new"))).toEqual([0, "replaced", ""]);
+    expect(await send(request(1, "old"))).toEqual([0, "duplicate", ""]);
+    // The watcher replays the edit after a kill before it saved: same answer, no second row.
+    expect(await send(edit(1, "new"))).toEqual([0, "replaced", ""]);
+    // The original was already sent: the lead has the old text, so the edit becomes its own item.
+    expect(await send(request(2, "asked"))).toEqual([0, "inserted", ""]);
+    const inbox = new LeadInbox(state.dir, "omo", realClock);
+    inbox.mark(
+      inbox.list().flatMap((i) => (i.id === request(2, "").id ? [i.seq] : [])),
+      "sent",
+    );
+    inbox.close();
+    expect(await send(edit(2, "changed"))).toEqual([0, "inserted", ""]);
+    expect(await send(edit(2, "changed"))).toEqual([0, "duplicate", ""]);
+    // replaces names nothing in this inbox: insert as before.
+    expect(await send(edit(3, "orphan"))).toEqual([0, "inserted", ""]);
+    const bad = await dori(state.dir, put, JSON.stringify(edit(4, "x", "bad id")));
+    expect([bad.code, bad.out, bad.err.startsWith('invalid replaces "bad id"')]).toEqual([2, "", true]);
+
+    expect(rows(state.dir).map((r) => [r.id, r.kind, r.state, content(r.body)])).toEqual([
+      ["d:omo:130000000000000001", "request", "queued", "new"],
+      ["d:omo:130000000000000002", "request", "sent", "asked"],
+      ["e:omo:130000000000000002:1763650000002", "edit", "queued", "changed"],
+      ["e:omo:130000000000000003:1763650000003", "edit", "queued", "orphan"],
+    ]);
+  } finally {
+    state.done();
+  }
+});
+
 test("import-spool puts oldest first, deletes only answered files, moves invalid ones to rejected/", () => {
   const state = withState();
   try {
