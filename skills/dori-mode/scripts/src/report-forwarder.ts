@@ -3,7 +3,7 @@
  * lead inbox, so a lane never names or calls the lead. Each journal line becomes one envelope whose id is
  * `r:<machine>:<laneKey>:<byteOffset>`; the inbox ignores an id it already holds, so a line sent twice (a crash after
  * delivery, a timeout after the far side stored it) is still one item. A file's cursor moves only past lines whose
- * delivery exited 0, and the lines of one file go strictly in order.
+ * delivery was acknowledged (see ACKS), and the lines of one file go strictly in order.
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
@@ -13,14 +13,14 @@ import { fileURLToPath } from "node:url";
 import { ConfigError, type DoriConfig } from "./config.ts";
 import { LANE_KEY, type Registry } from "./registry.ts";
 import { type LaneEvent, parseEvent, ReportError, reportLine } from "./reports.ts";
-import type { Runner } from "./run.ts";
+import type { Ran, Runner } from "./run.ts";
 
 export type ForwarderDeps = {
   readonly run: Runner;
   readonly registry: Registry;
   readonly stateDir: string;
   readonly machine: string;
-  /** Run once per envelope with the envelope as JSON on stdin; exit 0 means the inbox holds it. */
+  /** Run once per envelope with the envelope as JSON on stdin; it must exit 0 and print an ACKS word last. */
   readonly inboxArgv: readonly string[];
 };
 
@@ -32,6 +32,11 @@ export type ForwardAct = {
 
 // The far side may be an ssh hop whose remote command hangs; a delivery that runs out is a failure, retried later.
 const DELIVERY_TIMEOUT_MS = 30_000;
+// The last stdout line that proves the inbox holds the envelope: `spooled` from macmini's dori-inbox-drop, `inserted`
+// or `duplicate` from `dori lead-inbox put`. The exit code alone is not proof: Tailscale SSH into macmini reports 0
+// for every remote command, so a refused envelope or a missing entry command would read as delivered.
+const ACKS: ReadonlySet<string> = new Set(["spooled", "inserted", "duplicate"]);
+const acknowledged = (ran: Ran): boolean => ran.code === 0 && ACKS.has(ran.out.trim().split("\n").at(-1)?.trim() ?? "");
 const NEWLINE = 0x0a;
 
 /** The omo lead's inbox on this machine: the lead-inbox command of this same CLI, under the same DORI_CONFIG. */
@@ -141,8 +146,9 @@ const forwardJournal = async (
         body: `${reportLine({ key: lane.key, kind: event.type === "report" ? event.kind : "stalled", text: event.text })}\nmachine ${deps.machine} | thread ${lane.thread} | at ${event.at}`,
       };
       const ran = await deps.run(deps.inboxArgv, { stdin: JSON.stringify(envelope), timeoutMs: DELIVERY_TIMEOUT_MS });
-      if (ran.code !== 0) {
-        acts.push({ kind: "failed", lane: lane.key, detail: `${id} exit ${ran.code} ${ran.err}`.trim().slice(0, 300) });
+      if (!acknowledged(ran)) {
+        const said = `${ran.out} ${ran.err}`.replace(/\s+/g, " ").trim();
+        acts.push({ kind: "failed", lane: lane.key, detail: `${id} exit ${ran.code} no ack: ${said}`.slice(0, 300) });
         return { cursor: at, acts };
       }
       acts.push({ kind: "forwarded", lane: lane.key, detail: `${id} ${kind}` });

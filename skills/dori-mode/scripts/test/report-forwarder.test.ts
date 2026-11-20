@@ -102,7 +102,11 @@ test("T2.13 a delivery failing for ten simulated minutes holds the cursor, then 
   const box = inbox();
   const put = store(box);
   box.answer = (e) => {
-    if (clock.now() < T0 + 10 * 60_000) return { code: 255, out: "", err: "ssh: connect timed out" };
+    // Alternate a real ssh failure with the Tailscale-masked one (exit 0, no acknowledgement on stdout)
+    if (clock.now() < T0 + 10 * 60_000)
+      return (clock.now() - T0) % 30_000 === 0
+        ? { code: 255, out: "", err: "ssh: connect timed out" }
+        : { code: 0, out: "", err: "dori-inbox-drop: No such file or directory" };
     put(e);
     return { code: 0, out: "inserted", err: "" };
   };
@@ -210,4 +214,30 @@ test("a machine name that is not a lowercase word is refused before anything is 
   const box = inbox();
   expect(() => forwarderDeps({ ...config, machine: "MacBook Pro" }, runnerFor(box), reg)).toThrow(/invalid machine/);
   expect(forwarderDeps({ ...config, machine: "omarchy" }, runnerFor(box), reg).machine).toBe("omarchy");
+});
+
+test("exit 0 without an acknowledgement (Tailscale SSH masks the remote status) is a failure: no row, no cursor", async () => {
+  await new Registry(state.dir).write(lane("fix-x"));
+  new Reports(state.dir).report("fix-x", "blocker", "stuck", T0);
+  const box = inbox();
+  box.answer = () => ({ code: 0, out: "", err: "rejected: bad id" });
+  const acts = await forwardTick(deps(box));
+  expect(acts.map((a) => a.kind)).toEqual(["failed"]);
+  expect(acts[0]?.detail).toContain("rejected: bad id");
+  expect(existsSync(cursors())).toBe(false);
+  expect(box.rows.size).toBe(0);
+});
+
+test("exit 0 with spooled as the last stdout line is a delivery", async () => {
+  await new Registry(state.dir).write(lane("fix-x"));
+  new Reports(state.dir).report("fix-x", "done", "merged", T0);
+  const box = inbox();
+  const put = store(box);
+  box.answer = (e) => {
+    put(e);
+    return { code: 0, out: "spooled\n", err: "" };
+  };
+  expect((await forwardTick(deps(box))).map((a) => a.kind)).toEqual(["forwarded"]);
+  expect(box.rows.size).toBe(1);
+  expect(JSON.parse(readFileSync(cursors(), "utf8"))).toEqual({ "fix-x": readFileSync(journal("fix-x")).length });
 });
