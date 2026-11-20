@@ -138,6 +138,9 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
       try {
         previous = reports.read(lane.key);
         const screen = await readScreen(runtimesOf(deps), ref);
+        const lastQuestion = ref.runtime === "omo-host" ? reports.question(lane, screen, now) : lane.lastQuestion;
+        if (lastQuestion !== lane.lastQuestion) latest = { ...lane, lastQuestion };
+        if (latest !== lane) await deps.registry.write(latest);
         let supervised: SupervisionResult | null = null;
         try {
           // A launched lane is supervised once its journal exists; without one there is no progress to judge.
@@ -147,12 +150,12 @@ export const freshnessTick = async (deps: FlowDeps, home: string): Promise<Sweep
           const detail = error instanceof Error ? error.message : String(error);
           if (detail !== lane.lastSupervisionError) {
             acts.push({ kind: "supervision-error", lane: lane.key, detail });
-            latest = { ...lane, lastSupervisionError: detail };
+            latest = { ...latest, lastSupervisionError: detail };
             await deps.registry.write(latest);
           }
         }
         if (supervised && lane.lastSupervisionError) {
-          latest = { ...lane, lastSupervisionError: undefined };
+          latest = { ...latest, lastSupervisionError: undefined };
           await deps.registry.write(latest);
         }
         for (const detail of supervised?.alerts ?? []) {

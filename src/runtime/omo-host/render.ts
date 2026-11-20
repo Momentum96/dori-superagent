@@ -48,14 +48,25 @@ const elapsed = (ms: number): string => {
   return `${h ? `${h}h ` : ""}${h || m ? `${m}m ` : ""}${s % 60}s`;
 };
 
-/** A question the agent asked (`? <title> [option / option]`): it waits for the answer as its next prompt. */
+const questionLine = (title: string | undefined, options: unknown): string => {
+  const labels = (Array.isArray(options) ? options : []).flatMap((o) =>
+    typeof o === "string" ? [o] : (str(rec(o)["label"]) ?? []),
+  );
+  return `? ${lines(title ?? "(question)")[0]}${labels.length ? ` [${labels.join(" / ")}]` : ""}`;
+};
+
+/**
+ * A question the agent asked (`? <title> [option / option]`): it waits for the answer as its next prompt. The question
+ * tool's request carries `questions[]` ({ header, question, options: [{ label }] }), one line each; a select dialog
+ * has its own title and string options.
+ */
 const questionLines = (state: Record<string, unknown>): string[] =>
   [state["pendingQuestions"], state["pendingDialogs"]].flatMap((list) =>
-    (Array.isArray(list) ? list.map(rec) : []).map((q) => {
-      const options = Array.isArray(q["options"]) ? q["options"].filter((o) => typeof o === "string") : [];
-      const title = str(q["title"]) ?? str(q["question"]) ?? "(question)";
-      return `? ${lines(title)[0]}${options.length ? ` [${options.join(" / ")}]` : ""}`;
-    }),
+    (Array.isArray(list) ? list.map(rec) : []).flatMap((q) =>
+      Array.isArray(q["questions"])
+        ? q["questions"].map(rec).map((s) => questionLine(str(s["question"]) ?? str(s["header"]), s["options"]))
+        : [questionLine(str(q["title"]) ?? str(q["question"]), q["options"])],
+    ),
   );
 
 const count = (value: unknown): number => (typeof value === "number" && value > 0 ? value : 0);

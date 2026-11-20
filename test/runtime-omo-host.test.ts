@@ -135,6 +135,13 @@ describe("probe and deliver", () => {
     expect(await rt.deliver(REF, "hi")).toEqual({ kind: "no-agent" });
   });
 
+  test("a question-tool request draws one `? ` line per question, with the option labels", async () => {
+    const { host, rt } = rig();
+    const questions = [{ header: "진행", question: "어떻게 진행할까요?", options: [{ label: "A" }, { label: "B" }] }];
+    host.add({ id: ID, state: { pendingQuestions: [{ method: "question", questions }] } });
+    expect(await rt.read(REF, 3)).toBe("? 어떻게 진행할까요? [A / B]\n❯");
+  });
+
   test("a failure after the gate is ambiguous and never carries the text", async () => {
     const { host, rt } = rig();
     host.add({ id: ID });
