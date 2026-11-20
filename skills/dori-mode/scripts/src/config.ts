@@ -32,6 +32,12 @@ export type DoriConfig = {
   readonly laneRuntime?: RuntimeKind;
   /** Where the lead session lives; absent = the same runtime as `runtime`. Read by lanes to name how they reach the lead. */
   readonly leadRuntime?: RuntimeKind;
+  /** Lanes reach the lead through its inbox (`dori report` alone delivers); implied when leadRuntime is omo-host. */
+  readonly leadInbox?: boolean;
+  /** What `dori forward-reports` hands each envelope to on stdin; absent = this CLI's `lead-inbox put` here. */
+  readonly leadInboxArgv?: ArgvTemplate;
+  /** This machine's name in forwarded report ids (`r:<machine>:...`, checked there); absent = the short host name. */
+  readonly machine?: string;
   readonly stateDir: string;
   readonly laneWorkspace: string;
   readonly workspaces: readonly string[];
@@ -119,6 +125,14 @@ const repoIdentities = (value: unknown): Record<string, CommitIdentity> =>
 
 export class ConfigError extends Error {}
 
+const checkLeadInbox = (raw: Readonly<Record<string, unknown>>): void => {
+  if (raw["leadInbox"] !== undefined && typeof raw["leadInbox"] !== "boolean")
+    throw new ConfigError("invalid leadInbox: expected true or false");
+  const argv = raw["leadInboxArgv"];
+  if (argv !== undefined && !(Array.isArray(argv) && argv.length > 0 && argv.every((a) => typeof a === "string" && a)))
+    throw new ConfigError("invalid leadInboxArgv: expected a non-empty array of non-empty strings");
+};
+
 const RUNTIMES: Readonly<Record<TerminalKind, true>> = { herdr: true, hc: true };
 const LANE_RUNTIMES: Readonly<Record<RuntimeKind, true>> = { ...RUNTIMES, "omo-host": true };
 const checkRuntime = (name: string, value: unknown, allowed: Readonly<Record<string, true>>): void => {
@@ -188,6 +202,7 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
   checkRuntime("laneRuntime", raw.laneRuntime, LANE_RUNTIMES);
   checkRuntime("leadRuntime", raw.leadRuntime, LANE_RUNTIMES);
   checkSupervision(raw.supervision);
+  checkLeadInbox(raw);
   const merged: DoriConfig = {
     ...base,
     ...raw,

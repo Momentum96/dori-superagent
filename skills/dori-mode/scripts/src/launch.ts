@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { configPath, fill } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import { laneGoalActive } from "./goal-record.ts";
-import { BRIEF_START, cliCommand, footer, leadSendArgv, originalBrief, quoteForPane } from "./launch-footer.ts";
+import { BRIEF_START, cliCommand, footer, leadReach, originalBrief, quoteForPane } from "./launch-footer.ts";
 import type { Runtimes } from "../../../../src/runtime/registry.ts";
 import { AGENT_SESSION_KINDS, type SessionRef } from "../../../../src/runtime/types.ts";
 import { LANE_KEY, type Lane, RESERVED_LANE_KEY, sessionFields } from "./registry.ts";
@@ -117,7 +117,7 @@ export const prepareLaunch = async (
   return {
     lane: draft,
     warnings: problems.map((problem) => `LESSON_WARNING ${problem}`),
-    preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities, hostedCli(deps), leadSendArgv(leadKind(deps), deps.config.leadPane))}`,
+    preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities, hostedCli(deps), leadReach(leadKind(deps), deps.config.leadPane, deps.config.leadInbox))}`,
   };
 };
 
