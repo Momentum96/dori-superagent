@@ -13,6 +13,8 @@ export type Hooks = {
   readonly transcribe?: ArgvTemplate;
   /** Run once per lead-inbox item the lead accepted: {id} {kind} {source} {channel} {message} (the last two empty off Discord). */
   readonly inboxAccepted?: ArgvTemplate;
+  /** `dori lead replace`: post one line to the status channel, {text}. */
+  readonly leadAlert?: ArgvTemplate;
 };
 
 export type GuardThresholds = {
