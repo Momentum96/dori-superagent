@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import { type Command, die, makeCli } from "./cli-context.ts";
 import { journalCommands, journalErrors } from "./cli-journal.ts";
 import { laneCommands } from "./cli-lanes.ts";
+import { leadInboxCommands } from "./cli-lead-inbox.ts";
 import { messengerCommands, messengerErrors } from "./cli-messenger.ts";
 import { opsCommands } from "./cli-ops.ts";
 import { ConfigError, loadConfig } from "./config.ts";
@@ -59,7 +60,12 @@ const USAGE = `dori <command> [options]
   inbound slack|telegram [--loop MIN]  print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
                                        the Dori posted in (any helper), DMs and channels with unread mentions
   inbound gateway [--session ID] [--session-file PATH]
-                                       subscribe as the lead session (default PI_SESSION_ID, PI_SESSION_FILE); print INBOUND lines, ack each`;
+                                       subscribe as the lead session (default PI_SESSION_ID, PI_SESSION_FILE); print INBOUND lines, ack each
+  lead-inbox put --bot B --id ID --kind K --source S   body from stdin; prints inserted or duplicate
+  lead-inbox put --bot B --envelope    one JSON object {id,kind,source,body,channel?,message?} on stdin
+  lead-inbox list --bot B [--state S] [--json] | stats --bot B [--json]
+  lead-inbox import-spool --bot B --spool DIR [--loop]
+                                       put the spool's *.json envelopes oldest first; invalid ones go to DIR/rejected/`;
 
 const config = await loadConfig().catch((e: unknown) =>
   e instanceof ConfigError ? die(e.message) : Promise.reject(e),
@@ -112,6 +118,12 @@ const flags = parseArgs({
     line: { type: "string", multiple: true },
     session: { type: "string" },
     "session-file": { type: "string" },
+    bot: { type: "string" },
+    id: { type: "string" },
+    envelope: { type: "boolean" },
+    state: { type: "string" },
+    json: { type: "boolean" },
+    spool: { type: "string" },
   },
 });
 
@@ -120,6 +132,7 @@ const commands: Readonly<Record<string, Command>> = {
   ...laneCommands,
   ...opsCommands,
   ...messengerCommands,
+  ...leadInboxCommands,
 };
 const handler = Object.hasOwn(commands, command) ? commands[command] : undefined;
 
