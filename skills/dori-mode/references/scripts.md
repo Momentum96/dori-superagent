@@ -21,7 +21,8 @@ Needs: bun 1.3+, herdr or hc, git, and the GitHub CLI (`gh`) for `merged`/`close
 | Field | Default | Used by |
 |---|---|---|
 | `runtime` | detected | every command that opens or reads a session: `"herdr"` or `"hc"`. Unset, the Dori picks hc inside an hc terminal (`HC_TERMINAL_ID`), herdr inside a herdr pane (`HERDR_PANE_ID`), else hc when it is on PATH, else herdr, and refuses only when neither is there. Lanes already open stay on the runtime that opened them |
-| `laneRuntime` | `runtime` | `launch`: where new lanes open, `"herdr"`, `"hc"` or `"omo-host"`. `omo-host` opens each lane as a session of omo's shared engine host (one process per machine, a few MB per idle lane) instead of a TUI omo in a terminal; the lead stays on `runtime`, which never takes `omo-host`. Such a lane has no terminal: `dori attach` opens a view, and its env (`DORI_CONFIG`, the token-file variables) rides in the dori commands its footer names |
+| `laneRuntime` | `runtime` | `launch`: where new lanes open, `"herdr"`, `"hc"` or `"omo-host"`. `omo-host` opens each lane as a session of omo's shared engine host (one process per machine, a few MB per idle lane) instead of a TUI omo in a terminal; `runtime` never takes `omo-host`. Such a lane has no terminal: `dori attach` opens a view, and its env (`DORI_CONFIG`, the token-file variables) rides in the dori commands its footer names |
+| `leadRuntime` | `runtime` | `launch`, `boot`: where the lead session lives, `"herdr"`, `"hc"` or `"omo-host"`; a lane's footer names how it reaches the lead by this kind, and `boot` prints `LEAD_RUNTIME <kind> (from config)`. `dori up` does not read it |
 | `stateDir` | `~/.dori/state` | registry, heavy slots |
 | `laneWorkspace` | current workspace | `launch`: the herdr workspace, or on hc the `dori.group` label (default `dori`) |
 | `workspaces` | all | `sync`, `dead-panes`: herdr workspaces, or `dori.group` labels on hc |

@@ -75,10 +75,11 @@ const hostedCli = (deps: FlowDeps): string | undefined =>
     ? cliCommand(undefined, { ...laneEnv(), DORI_CONFIG: resolve(configPath()) })
     : undefined;
 
-// The runtime the lead's pane is on; unknown when no runtime can be chosen (the footer then names no command).
-const leadKind = (deps: FlowDeps): string | undefined => {
+// The runtime the lead's session is on (`leadRuntime`, else the default); unknown when no runtime can be chosen (the
+// footer then names no command).
+export const leadKind = (deps: FlowDeps): string | undefined => {
   try {
-    return runtimesOf(deps).default.kind;
+    return runtimesOf(deps).lead.kind;
   } catch {
     return undefined;
   }

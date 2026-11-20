@@ -1,5 +1,6 @@
 {
   "runtime": "herdr",
+  "leadRuntime": "herdr",
   "stateDir": "~/.dori/state",
   "laneWorkspace": "lanes",
   "workspaces": ["lanes"],

@@ -54,7 +54,10 @@ export class ChosenRuntimes extends Runtimes {
   constructor(
     pick: () => RuntimeChoice,
     make: (kind: RuntimeKind) => SessionRuntime,
-    private readonly laneKind?: RuntimeKind,
+    private readonly placement: {
+      readonly lane?: RuntimeKind | undefined;
+      readonly lead?: RuntimeKind | undefined;
+    } = {},
   ) {
     let choice: RuntimeChoice | undefined;
     let failure: Error | undefined;
@@ -76,7 +79,12 @@ export class ChosenRuntimes extends Runtimes {
 
   /** Where new lanes open: the config's `laneRuntime`, else the selected (default) runtime. */
   get lane(): SessionRuntime {
-    return this.laneKind === undefined ? this.default : this.for({ runtime: this.laneKind, id: "" });
+    return this.placement.lane === undefined ? this.default : this.for({ runtime: this.placement.lane, id: "" });
+  }
+
+  /** Where the lead session lives: the config's `leadRuntime`, else the selected (default) runtime. */
+  get lead(): SessionRuntime {
+    return this.placement.lead === undefined ? this.default : this.for({ runtime: this.placement.lead, id: "" });
   }
 }
 
@@ -89,7 +97,7 @@ export const runtimeChoice = (config: Pick<DoriConfig, "runtime">, env: Env): Ru
 
 /** Every runtime behind the skill's Runner, so tests swap the binaries for a recorder; sleeps go through the clock. */
 export const runtimesFor = (
-  config: Pick<DoriConfig, "runtime" | "laneRuntime">,
+  config: Pick<DoriConfig, "runtime" | "laneRuntime" | "leadRuntime">,
   env: Env,
   runner: Runner = run,
   clock: Clock = realClock,
@@ -106,7 +114,7 @@ export const runtimesFor = (
   return new ChosenRuntimes(
     () => runtimeChoice(config, env),
     (kind) => make[kind](),
-    config.laneRuntime,
+    { lane: config.laneRuntime, lead: config.leadRuntime },
   );
 };
 
@@ -116,7 +124,7 @@ const built = new WeakMap<object, ChosenRuntimes>();
 export const runtimesOf = (deps: {
   readonly run: Runner;
   readonly clock: Clock;
-  readonly config: Pick<DoriConfig, "runtime" | "laneRuntime">;
+  readonly config: Pick<DoriConfig, "runtime" | "laneRuntime" | "leadRuntime">;
   readonly rts?: ChosenRuntimes;
   readonly env?: Env;
 }): ChosenRuntimes => {

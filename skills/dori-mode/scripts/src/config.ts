@@ -26,6 +26,8 @@ export type DoriConfig = {
   readonly runtime?: TerminalKind;
   /** Where new lanes open; absent = the same runtime as `runtime`. `omo-host` runs each lane inside omo's shared host. */
   readonly laneRuntime?: RuntimeKind;
+  /** Where the lead session lives; absent = the same runtime as `runtime`. Read by lanes to name how they reach the lead. */
+  readonly leadRuntime?: RuntimeKind;
   readonly stateDir: string;
   readonly laneWorkspace: string;
   readonly workspaces: readonly string[];
@@ -180,6 +182,7 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
   const raw = (await file.exists()) ? ((await file.json()) as Partial<DoriConfig>) : {};
   checkRuntime("runtime", raw.runtime, RUNTIMES);
   checkRuntime("laneRuntime", raw.laneRuntime, LANE_RUNTIMES);
+  checkRuntime("leadRuntime", raw.leadRuntime, LANE_RUNTIMES);
   checkSupervision(raw.supervision);
   const merged: DoriConfig = {
     ...base,

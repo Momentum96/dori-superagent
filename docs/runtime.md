@@ -152,7 +152,7 @@ The two loops are plain processes with no inbox and no agent, so they skip steps
 
 ## Lanes in omo's shared host (`omo-host`)
 
-`"laneRuntime": "omo-host"` in the dori-mode config opens new lanes as sessions of omo's shared engine host instead of a TUI omo per terminal; the lead, duty and loops stay on `runtime` (herdr or hc), which never takes `omo-host`. One host process serves every lane on the machine (about 250 MB once, then a few MB per idle session, against 115-380 MB per TUI omo). The adapter, `src/runtime/omo-host/`, calls the `omo host session` CLI, one `--json` call per step:
+`"laneRuntime": "omo-host"` in the dori-mode config opens new lanes as sessions of omo's shared engine host instead of a TUI omo per terminal; duty and loops stay on `runtime` (herdr or hc), which never takes `omo-host`. The lead stays there too unless `"leadRuntime"` names where its session lives (`"omo-host"` for a lead that is itself a host session); `dori boot` prints it as `LEAD_RUNTIME <kind> (from config)`, and a lane's footer names the lead's send command by that kind (none for `omo-host`). `dori up` still starts a terminal lead only. One host process serves every lane on the machine (about 250 MB once, then a few MB per idle session, against 115-380 MB per TUI omo). The adapter, `src/runtime/omo-host/`, calls the `omo host session` CLI, one `--json` call per step:
 
 | Interface | omo-host |
 |---|---|
