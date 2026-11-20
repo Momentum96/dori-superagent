@@ -5,6 +5,7 @@ import { type Command, die, makeCli } from "./cli-context.ts";
 import { journalCommands, journalErrors } from "./cli-journal.ts";
 import { laneCommands } from "./cli-lanes.ts";
 import { leadInboxCommands } from "./cli-lead-inbox.ts";
+import { leadPumpCommands } from "./cli-lead-pump.ts";
 import { messengerCommands, messengerErrors } from "./cli-messenger.ts";
 import { opsCommands } from "./cli-ops.ts";
 import { ConfigError, loadConfig } from "./config.ts";
@@ -65,7 +66,8 @@ const USAGE = `dori <command> [options]
   lead-inbox put --bot B --envelope    one JSON object {id,kind,source,body,channel?,message?} on stdin
   lead-inbox list --bot B [--state S] [--json] | stats --bot B [--json]
   lead-inbox import-spool --bot B --spool DIR [--loop]
-                                       put the spool's *.json envelopes oldest first; invalid ones go to DIR/rejected/`;
+                                       put the spool's *.json envelopes oldest first; invalid ones go to DIR/rejected/
+  lead-pump --bot B [--once]           deliver the inbox to the lead named in lead/B.json; write health/B.json`;
 
 const config = await loadConfig().catch((e: unknown) =>
   e instanceof ConfigError ? die(e.message) : Promise.reject(e),
@@ -124,6 +126,7 @@ const flags = parseArgs({
     state: { type: "string" },
     json: { type: "boolean" },
     spool: { type: "string" },
+    once: { type: "boolean" },
   },
 });
 
@@ -133,6 +136,7 @@ const commands: Readonly<Record<string, Command>> = {
   ...opsCommands,
   ...messengerCommands,
   ...leadInboxCommands,
+  ...leadPumpCommands,
 };
 const handler = Object.hasOwn(commands, command) ? commands[command] : undefined;
 

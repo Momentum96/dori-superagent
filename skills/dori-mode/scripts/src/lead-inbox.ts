@@ -182,6 +182,37 @@ export class LeadInbox {
     )();
   }
 
+  private each(sql: string, seqs: readonly number[], params: Record<string, string | number> = {}): number {
+    const update = this.db.query(sql);
+    return this.db.transaction(() => seqs.reduce((n, seq) => n + update.run({ ...params, seq }).changes, 0))();
+  }
+
+  /** Sent to the lead of `generation`: sent_at stamped and one more attempt counted, as mark(seqs, "sent"). */
+  send(seqs: readonly number[], generation: number): number {
+    const sql =
+      "UPDATE items SET state = 'sent', sent_at = $at, attempts = attempts + 1, generation = $g WHERE seq = $seq";
+    return this.each(sql, seqs, { at: iso(this.clock), g: generation });
+  }
+
+  /** The call never reached the lead (busy, host down): back to queued with that attempt uncounted. */
+  release(seqs: readonly number[]): number {
+    const sql =
+      "UPDATE items SET state = 'queued', attempts = MAX(attempts - 1, 0) WHERE seq = $seq AND state = 'sent'";
+    return this.each(sql, seqs);
+  }
+
+  /** The lead has the items: done and accepted. */
+  accept(seqs: readonly number[]): number {
+    return this.each("UPDATE items SET state = 'done', accepted = 1 WHERE seq = $seq", seqs);
+  }
+
+  /** Done items sent to a generation older than `generation` at or after `since`: queued again for the new lead. */
+  requeueOlder(generation: number, since: string): number {
+    return this.db
+      .query("UPDATE items SET state = 'queued' WHERE state = 'done' AND generation < $g AND sent_at >= $since")
+      .run({ g: generation, since }).changes;
+  }
+
   /** An edit before delivery replaces the body; once the item left queued the lead already has it, so false. */
   replaceBody(id: string, body: string): boolean {
     return (

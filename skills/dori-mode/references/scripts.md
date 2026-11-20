@@ -39,6 +39,7 @@ Needs: bun 1.3+, herdr or hc, git, and the GitHub CLI (`gh`) for `merged`/`close
 | `guard` | load 150/80, 20% memory, 50 GB disk, 20 panes | `guard` |
 | `hooks.threadReply`, `hooks.threadDone` | none | `freshness`, `close` |
 | `hooks.transcribe` | none | `transcribe` (argv with `{file}`, prints the text) |
+| `hooks.inboxAccepted` | none | `lead-pump`: run once per inbox item the lead accepted, with `{id}`, `{kind}`, `{source}`, `{channel}` and `{message}` (the last two empty for an item that did not come from Discord) |
 | `supervision` | no ceilings by default (set wallMinutes, tokens or costUsd to enable); hung after 20 min | `freshness`, `launch`, `close` (see Supervision below) |
 | `repoIdentities` | none | `verify-pr`, `launch` footer: expected Git name and email per `owner/repo` (keys match without case) |
 | `gateway.socket` | `/run/dori-gateway/dori.sock` | `send gateway`, `inbound gateway`, `boot`: the dori.bot surface's local socket (no token); `DORI_GATEWAY_SOCKET` overrides it |
@@ -200,6 +201,9 @@ Prints `INBOUND <source> <chat> <thread> <update-id> mid=<message_id> <from> <te
 
 ### `dori transcribe <audio-file>`
 Runs `hooks.transcribe` and prints the transcript. A failed or empty transcription is an error, never an empty message.
+
+### `dori lead-pump --bot B [--once]`
+The one process that calls the bot's lead session. Every 2 s it reads `<stateDir>/lead/B.json` and delivers the next lead-inbox batch (up to 20 items, one text under 8 KiB) with the lead runtime's `deliver`: a prompt into an idle session, a steer into a working one. Each item starts with `[INBOX#<id>]`, its body lines sit behind `  | `, and the pump confirms a delivery by finding that token at the start of a line in the lead's transcript, so a token written inside a body never counts. It makes no call while the lead is `switching`, refuses (exits 1) when the active id is in `retired`, never calls another session, and never aborts the lead. Every omo call is killed after 120 s; a timeout or an unclear result is checked against the transcript and sent once more only when the token is absent. `host_unavailable` or `transport_gone` is retried after 5, 15, 30, then every 60 s. A new engine-host pid or start time, or a higher lead `generation`, puts a `sys:` item in front of the next batch (a replaced lead also gets the items the old one received in its last 10 minutes again, marked `replayed=true`). Every 30 s it writes `<stateDir>/health/B.json` (host, lead activity from `list` only, `pendingQuestion`, `stuck` after 4 minutes, queue age, last error). One pump per bot: a second one exits 3 while the first is alive. `--once` runs one tick and writes the health file.
 
 ### `dori heavy <label> -- <command ...>`
 Waits until load is under `heavyMaxLoad` and one of `heavySlots` is free, then runs the command and frees the slot when it exits. A slot held by a process that no longer exists (or a zombie) is taken over. Use it for full builds and test suites. Installs, focused tests and git do not need it.

@@ -43,6 +43,14 @@ export class FakeOmoHost {
   readonly calls: string[][] = [];
   /** A reason the next call of this verb is refused with, once. */
   readonly refuseNext = new Map<string, string>();
+  /**
+   * The next call of this verb is killed at the caller's timeout (exit 124, no output), once: "before" the host saw it,
+   * or "after" it took effect (a prompt that started its turn but never answered).
+   */
+  readonly hangNext = new Map<string, "before" | "after">();
+  /** `host status`: the running host's pid and start time. `down`: status unreachable, every session verb host_unavailable. */
+  status = { pid: 4242, processStartTime: "Fri Nov 20 00:47:34 2026 UTC" };
+  down = false;
   /** Where opened sessions' files live (a temp dir in tests that read goal records). */
   constructor(private readonly sessionsDir = "/nonexistent/sessions") {}
 
@@ -64,10 +72,24 @@ export class FakeOmoHost {
   }
 
   readonly exec: Exec = async (cmd, argv) => {
+    if (cmd === "omo" && argv.join(" ") === "host status --json") {
+      this.calls.push(["status"]);
+      return ok(this.down ? { reachable: false, pid: null } : { reachable: true, lifecycle: "ready", ...this.status });
+    }
     if (cmd !== "omo" || argv[0] !== "host" || argv[1] !== "session" || argv.at(-1) !== "--json")
       return { code: 2, stdout: "", stderr: `unexpected ${cmd} ${argv.join(" ")}` };
     const args = argv.slice(2, -1);
     this.calls.push(args);
+    const [verb = ""] = args;
+    if (this.down) return { ...refuse("host_unavailable"), code: 1 };
+    const hang = this.hangNext.get(verb);
+    this.hangNext.delete(verb);
+    if (hang === "before") return { code: 124, stdout: "", stderr: "killed by SIGKILL (timeout)" };
+    const answer = this.answer(args);
+    return hang === "after" ? { code: 124, stdout: "", stderr: "killed by SIGKILL (timeout)" } : answer;
+  };
+
+  private answer(args: readonly string[]): ExecResult {
     const [verb = "", ref = ""] = args;
     const refused = this.refuseNext.get(verb);
     if (refused !== undefined) {
@@ -100,8 +122,15 @@ export class FakeOmoHost {
     switch (verb) {
       case "state":
         return ok({ action: "state", durableSessionId: s.id, state: s.state });
-      case "read":
-        return ok({ action: "read", entries: s.entries.slice(-Number(flag(args, "--tail") ?? s.entries.length)) });
+      case "read": {
+        const tail = -Number(flag(args, "--tail") ?? s.entries.length);
+        if (!args.includes("--messages")) return ok({ action: "read", entries: s.entries.slice(tail) });
+        const messages = s.entries.flatMap((e) => {
+          const m = (e as { type?: unknown; message?: unknown }).message;
+          return (e as { type?: unknown }).type === "message" && m !== undefined ? [m] : [];
+        });
+        return ok({ action: "read", messages: messages.slice(tail) });
+      }
       case "prompt": {
         if (s.state["isStreaming"] === true) return refuse("busy");
         const goal = /^\/goal (pause|resume)$/.exec(text.trim())?.[1];
@@ -126,5 +155,5 @@ export class FakeOmoHost {
       default:
         return { code: 2, stdout: `${JSON.stringify({ action: "error", reason: "usage" })}\n`, stderr: "" };
     }
-  };
+  }
 }

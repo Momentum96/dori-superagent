@@ -95,10 +95,23 @@ export function goalOf(state: Record<string, unknown>): string {
   }
 }
 
+const listed = (value: unknown): number => (Array.isArray(value) ? value.length : 0);
+
+/**
+ * A question or dialog waits on a person. A select dialog shows in `pendingDialogs` and `lifecycle.waitingOn.human`
+ * while `pendingQuestions` stays empty and the session reads as streaming (spike S1, check g).
+ */
+const waitsOnHuman = (state: Record<string, unknown>): boolean =>
+  listed(state["pendingQuestions"]) +
+    listed(state["pendingDialogs"]) +
+    listed(rec(rec(state["lifecycle"])["waitingOn"])["human"]) >
+  0;
+
 export function probeOf(state: Record<string, unknown> | undefined): Probe {
   if (state === undefined) return { status: "gone", shellInFront: false };
   const [title, cwd] = [str(state["sessionName"]), str(state["cwd"])];
   return {
+    ...(waitsOnHuman(state) ? { waitingOnHuman: true } : {}),
     status: statusOf(state),
     agent: "omo",
     ...(title === undefined ? {} : { title }),
