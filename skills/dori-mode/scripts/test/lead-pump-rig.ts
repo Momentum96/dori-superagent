@@ -40,9 +40,13 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
     const r = await host.exec(cmd, rest);
     return { code: r.code, out: r.stdout, err: r.stderr } satisfies Ran;
   };
-  /** `read --messages` as the pump's file reader gets it; `cut` stands in for a pipe that stops at that many bytes. */
-  const reads: number[] = [];
+  /**
+   * `read` as the pump's file reader gets it (`undefined` = a full read). `cut` stands in for a pipe that stops at
+   * that many bytes; `tailBlind` for a tail that counts bookkeeping entries and so holds no message at all.
+   */
+  const reads: (number | undefined)[] = [];
   let cut = Number.POSITIVE_INFINITY;
+  let tailBlind = false;
   const writeLead = (over: Partial<LeadState> = {}): void =>
     writeLeadState(dir, {
       bot: "omo",
@@ -65,9 +69,16 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
       inbox,
       runtimes: runtimesFor({ runtime: "hc", leadRuntime: "omo-host" }, {}, runner, clock),
       host: async () => parseHostStatus((await runner(["omo", "host", "status", "--json"])).out),
-      transcript: async (id, tail) => {
+      transcript: async (id, { tail, messages }) => {
         reads.push(tail);
-        const r = await runner(["omo", "host", "session", "read", id, "--messages", "--tail", String(tail), "--json"]);
+        if (tail !== undefined && tailBlind) return JSON.stringify({ action: "read", messages: [], entries: [] });
+        const argv = [
+          "read",
+          id,
+          ...(messages ? ["--messages"] : []),
+          ...(tail === undefined ? [] : ["--tail", String(tail)]),
+        ];
+        const r = await runner(["omo", "host", "session", ...argv, "--json"]);
         return r.out.slice(0, cut);
       },
       run: runner,
@@ -91,6 +102,9 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
     },
     setHookCode: (code: number) => {
       hookCode = code;
+    },
+    setTailBlind: (on: boolean) => {
+      tailBlind = on;
     },
     setCut: (bytes: number) => {
       cut = bytes;

@@ -3,34 +3,16 @@
  * next inbox batch and delivers it with the lead runtime's own `deliver` (prompt when idle, steer when working). It
  * calls no session but the active lead id, makes no call while the lead is switching, and never aborts a stuck lead.
  */
-import type { Runtimes } from "../../../../src/runtime/registry.ts";
 import { type DeliverOutcome, parseRef, type Probe, type SessionRef } from "../../../../src/runtime/types.ts";
-import type { ArgvTemplate } from "./config.ts";
-import type { LeadInbox, LeadItem } from "./lead-inbox.ts";
+import type { LeadItem } from "./lead-inbox.ts";
 import { pumpHealth, readSeed, type Watch, writeHealth } from "./lead-pump-health.ts";
-import { hostRestarted, leadReplaced, refreshDue, runAcceptedHook, rulesRefresh } from "./lead-pump-sys.ts";
-import { type HostStatus, renderBatch, TEXT_CAP, transcriptTokens, WAKE } from "./lead-pump-text.ts";
+import { type PumpDeps, runAcceptedHook, SysItems } from "./lead-pump-sys.ts";
+import { renderBatch, TEXT_CAP, transcriptTokens, WAKE } from "./lead-pump-text.ts";
 import { type LeadState, LeadStateError, readLeadState } from "./lead-state.ts";
-import type { Clock, Runner } from "./run.ts";
 
 const BATCH_ITEMS = 20;
 const HEALTH_MS = 30_000;
 const BACKOFF_S = [5, 15, 30, 60] as const;
-
-export type PumpDeps = {
-  readonly stateDir: string;
-  readonly bot: string;
-  readonly clock: Clock;
-  readonly inbox: LeadInbox;
-  readonly runtimes: Pick<Runtimes, "for">;
-  /** `omo host status`, for a lead in omo's engine host. */
-  readonly host: () => Promise<HostStatus>;
-  /** The raw JSON answer of `read <id> --messages --tail <n>` (written to a file, so no pipe cuts it). */
-  readonly transcript: (id: string, tail: number) => Promise<string>;
-  readonly run: Runner;
-  readonly hookArgv?: ArgvTemplate | undefined;
-  readonly bootTime: string;
-};
 
 /** lead.json names a retired session as the active one: refused before anything is sent. */
 export class RetiredLeadError extends Error {}
@@ -41,13 +23,10 @@ const seqsOf = (items: readonly LeadItem[]): number[] => items.map((i) => i.seq)
 
 export class LeadPump {
   private lead: LeadState | null = null;
-  private known: { readonly pid: number | null; readonly startedAt: string | null } | undefined;
-  private hostNow: HostStatus | null = null;
-  private generation: number | undefined;
   private retryAt = 0;
   private failures = 0;
   private healthAt = Number.NEGATIVE_INFINITY;
-  private refreshCheckedAt: number;
+  private readonly sys: SysItems;
   private readonly givenUp = new Set<number>();
   private readonly watch: Watch = {
     steered: new Map(),
@@ -58,10 +37,8 @@ export class LeadPump {
 
   constructor(private readonly d: PumpDeps) {
     const seed = readSeed(d.stateDir, d.bot);
-    this.known = seed.host;
-    this.generation = seed.generation;
+    this.sys = new SysItems(d, seed);
     this.watch.lastDeliveredAt = seed.lastDeliveredAt ?? null;
-    this.refreshCheckedAt = seed.at ?? d.clock.now();
     d.inbox.mark(seqsOf(d.inbox.list("sent")), "ambiguous");
   }
 
@@ -83,12 +60,11 @@ export class LeadPump {
       this.fail(message(e));
     }
     const runtime = ref === undefined ? undefined : this.d.runtimes.for(ref);
-    const input = { ...this.d, now, lead: this.lead, ref, runtime, host: this.hostNow, watch: this.watch };
+    const input = { ...this.d, now, lead: this.lead, ref, runtime, host: this.sys.hostNow, watch: this.watch };
     writeHealth(this.d.stateDir, this.d.bot, await pumpHealth({ ...input, seen: this.seen }));
   }
 
   private async step(): Promise<boolean> {
-    const { inbox, clock } = this.d;
     this.lead = null;
     try {
       this.lead = await readLeadState(this.d.stateDir, this.d.bot);
@@ -101,16 +77,15 @@ export class LeadPump {
     if (lead.state === "switching") return false;
     const ref = this.refOf(lead);
     if (ref === undefined) return this.fail(`lead.json names no ${lead.runtime} session: ${lead.sessionId}`);
-    if (clock.now() < this.retryAt) return false;
-    if (this.generation !== undefined && lead.generation > this.generation) {
-      leadReplaced(inbox, lead, clock.now());
-      this.watch.steered.clear();
+    if (this.d.clock.now() < this.retryAt) return false;
+    if (this.sys.noteGeneration(lead)) this.watch.steered.clear();
+    if (ref.runtime === "omo-host" && !(await this.sys.hostReady(lead)))
+      return this.backoff("host_unavailable: omo host status is not ready");
+    try {
+      await this.sys.rulesDue(lead, ref);
+    } catch (e) {
+      return this.failed(e);
     }
-    this.generation = lead.generation;
-    if (ref.runtime === "omo-host" && !(await this.checkHost(lead))) return false;
-    const day = refreshDue(this.refreshCheckedAt, clock.now());
-    this.refreshCheckedAt = clock.now();
-    if (day !== undefined && lead.rules === "first-prompt") rulesRefresh(inbox, lead, day);
     return (await this.settleAmbiguous(ref)) && (await this.deliverBatch(lead, ref));
   }
 
@@ -137,27 +112,17 @@ export class LeadPump {
     return unreachable(message(e)) ? this.backoff(message(e)) : this.fail(message(e));
   }
 
-  private async checkHost(lead: LeadState): Promise<boolean> {
-    const s = await this.d.host();
-    this.hostNow = s.ready ? s : { ...s, ...this.known };
-    if (!s.ready) return this.backoff("host_unavailable: omo host status is not ready");
-    const changed = this.known !== undefined && (this.known.pid !== s.pid || this.known.startedAt !== s.startedAt);
-    this.known = { pid: s.pid, startedAt: s.startedAt };
-    if (changed) hostRestarted(this.d.inbox, lead, s);
-    return true;
-  }
-
-  private readonly seen = (ref: SessionRef, ids: readonly string[]): Promise<Set<string>> =>
+  private readonly seen = (ref: SessionRef, ids: readonly string[]): Promise<Set<string> | undefined> =>
     transcriptTokens(ref.runtime === "omo-host", ids, {
       screen: () => this.d.runtimes.for(ref).read(ref, 400),
-      messages: (tail) => this.d.transcript(ref.id, tail),
+      transcript: (opts) => this.d.transcript(ref.id, opts),
     });
 
   /** Items left without a result: accepted when their token is in the transcript, else sent once more, then left. */
   private async settleAmbiguous(ref: SessionRef): Promise<boolean> {
     const rows = this.d.inbox.list("ambiguous").filter((r) => !this.givenUp.has(r.seq));
     if (rows.length === 0) return true;
-    let found: Set<string>;
+    let found: Set<string> | undefined;
     try {
       found = await this.seen(
         ref,
@@ -166,6 +131,8 @@ export class LeadPump {
     } catch (e) {
       return this.failed(e);
     }
+    if (found === undefined)
+      return this.fail(`lead ${ref.id} transcript did not read whole; ${rows.length} item(s) kept`);
     await this.accept(rows.filter((r) => found.has(r.id)));
     for (const r of rows.filter((x) => !found.has(x.id))) {
       if (r.attempts < 2) this.d.inbox.mark([r.seq], "queued");
@@ -177,24 +144,29 @@ export class LeadPump {
     return true;
   }
 
+  /**
+   * Taken and marked sent in one transaction (an edit lands wholly before or after), then probed: a gone session or a
+   * pending dialog (its answer cannot come through the host CLI, spike S1 check g) puts the batch back unsent.
+   */
   private async deliverBatch(lead: LeadState, ref: SessionRef): Promise<boolean> {
     const { inbox } = this.d;
-    const sys = inbox.list("queued").filter((i) => i.id.startsWith("sys:"));
-    const rest = inbox.nextBatch(BATCH_ITEMS, TEXT_CAP).filter((i) => !sys.some((s) => s.seq === i.seq));
-    const batch = [...sys, ...rest].slice(0, BATCH_ITEMS);
-    if (batch.length === 0) return true;
+    const taken = inbox.take(BATCH_ITEMS, TEXT_CAP, lead.generation);
+    if (taken.length === 0) return true;
+    const { text, items } = renderBatch(taken, { bot: this.d.bot, generation: lead.generation });
+    inbox.release(seqsOf(taken.slice(items.length)));
     const rt = this.d.runtimes.for(ref);
     let probe: Probe;
     try {
       probe = await rt.probe(ref);
     } catch (e) {
+      inbox.release(seqsOf(items));
       return this.failed(e);
     }
-    if (probe.status === "gone") return this.fail(`lead session ${ref.id} is unknown to its ${ref.runtime} runtime`);
     this.watch.pendingQuestion = probe.waitingOnHuman === true;
-    const opts = { bot: this.d.bot, generation: lead.generation, notAnAnswer: this.watch.pendingQuestion };
-    const { text, items } = renderBatch(batch, opts);
-    inbox.send(seqsOf(items), lead.generation);
+    if (probe.status === "gone" || this.watch.pendingQuestion) {
+      inbox.release(seqsOf(items));
+      return probe.status !== "gone" || this.fail(`lead session ${ref.id} is unknown to its ${ref.runtime} runtime`);
+    }
     let out: DeliverOutcome;
     try {
       out = await rt.deliver(ref, text, { when: "any" });
@@ -220,6 +192,10 @@ export class LeadPump {
         this.d.inbox.mark(seqsOf(items), "ambiguous");
         return this.fail(`text typed into lead ${ref.id} but not submitted`);
       case "ambiguous": {
+        if (/\bhost_unavailable\b/.test(out.detail)) {
+          this.d.inbox.release(seqsOf(items));
+          return this.backoff(out.detail);
+        }
         if (out.failure !== "steer parked") {
           this.d.inbox.mark(seqsOf(items), "ambiguous");
           return unreachable(out.detail) ? this.backoff(out.detail) : this.fail(out.detail);

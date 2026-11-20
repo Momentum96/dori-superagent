@@ -4,11 +4,12 @@
  * SQLite rather than a jsonl journal (reports.ts) because several writers need id uniqueness and crash-safe order.
  * Not the pane message queue in src/inbox*.ts.
  */
-import { Database, SQLiteError } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { type Envelope, LeadInboxError, parseBot, parseEnvelope } from "./lead-envelope.ts";
+import { openInboxDb } from "./lead-inbox-db.ts";
 import { type Clock, iso } from "./run.ts";
 
 export type LeadItemState = "queued" | "sent" | "ambiguous" | "done";
@@ -63,39 +64,6 @@ const item = (r: Row): LeadItem => ({
   ...(r.message === null ? {} : { message: r.message }),
 });
 
-const SCHEMA = `CREATE TABLE IF NOT EXISTS items(
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  id TEXT UNIQUE NOT NULL,
-  kind TEXT,
-  source TEXT,
-  body TEXT,
-  state TEXT CHECK(state IN ('queued','sent','ambiguous','done')),
-  generation INTEGER,
-  created_at TEXT,
-  sent_at TEXT,
-  attempts INTEGER DEFAULT 0,
-  accepted INTEGER DEFAULT 0,
-  channel TEXT,
-  message TEXT)`;
-
-const WAL_SWITCH_MS = 10_000;
-
-// The switch to WAL takes an exclusive lock and SQLite answers SQLITE_BUSY at once, without the busy handler, while
-// another process is opening the same new file. WAL is stored in the file, so the first switch that lands is enough.
-const enableWal = (db: Database): void => {
-  const deadline = Date.now() + WAL_SWITCH_MS;
-  for (;;) {
-    try {
-      const row = db.query("PRAGMA journal_mode = WAL").get() as { journal_mode: string } | null;
-      if (row?.journal_mode === "wal") return;
-    } catch (e) {
-      if (!(e instanceof SQLiteError && e.code === "SQLITE_BUSY")) throw e;
-    }
-    if (Date.now() > deadline) throw new Error("lead inbox: could not switch the database to WAL within 10 s");
-    Bun.sleepSync(20);
-  }
-};
-
 export const leadInboxPath = (stateDir: string, bot: string): string =>
   join(stateDir, "lead-inbox", `${parseBot(bot)}.sqlite`);
 
@@ -109,10 +77,7 @@ export class LeadInbox {
   ) {
     const path = leadInboxPath(stateDir, bot);
     mkdirSync(join(stateDir, "lead-inbox"), { recursive: true });
-    this.db = new Database(path, { create: true, strict: true });
-    this.db.run("PRAGMA busy_timeout = 10000");
-    enableWal(this.db);
-    this.db.run(SCHEMA);
+    this.db = openInboxDb(path);
   }
 
   /**
@@ -187,11 +152,25 @@ export class LeadInbox {
     return this.db.transaction(() => seqs.reduce((n, seq) => n + update.run({ ...params, seq }).changes, 0))();
   }
 
-  /** Sent to the lead of `generation`: sent_at stamped and one more attempt counted, as mark(seqs, "sent"). */
-  send(seqs: readonly number[], generation: number): number {
-    const sql =
-      "UPDATE items SET state = 'sent', sent_at = $at, attempts = attempts + 1, generation = $g WHERE seq = $seq";
-    return this.each(sql, seqs, { at: iso(this.clock), g: generation });
+  /**
+   * The pump's batch, taken and marked in one immediate transaction so an edit (put with replaces) lands either before
+   * it, and the lead gets the new body, or after it, as its own item: `sys:` items first, then nextBatch, each moved
+   * to sent for `generation` (sent_at stamped, one more attempt) only while still queued. The rows as read.
+   */
+  take(maxItems: number, maxBytes: number, generation: number): LeadItem[] {
+    const sent = this.db.query(
+      "UPDATE items SET state = 'sent', sent_at = $at, attempts = attempts + 1, generation = $g WHERE seq = $seq AND state = 'queued'",
+    );
+    return this.db
+      .transaction((): LeadItem[] => {
+        const sys = this.list("queued").filter((i) => i.id.startsWith("sys:"));
+        const rest = this.nextBatch(maxItems, maxBytes).filter((i) => !sys.some((s) => s.seq === i.seq));
+        const at = iso(this.clock);
+        return [...sys, ...rest]
+          .slice(0, maxItems)
+          .filter((i) => sent.run({ at, g: generation, seq: i.seq }).changes === 1);
+      })
+      .immediate();
   }
 
   /** The call never reached the lead (busy, host down): back to queued with that attempt uncounted. */

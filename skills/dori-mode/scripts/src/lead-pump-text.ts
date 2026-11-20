@@ -7,7 +7,6 @@ import type { LeadItem } from "./lead-inbox.ts";
 
 /** The whole text is held to 8 KiB: it is passed as one argument (an `@file` argument would arrive as literal text). */
 export const TEXT_CAP = 8192;
-export const NOT_AN_ANSWER = "[INBOX] 아래는 질문의 답이 아님";
 export const WAKE = "[INBOX] 대기 항목 확인";
 
 const BODY = "  | ";
@@ -37,9 +36,9 @@ export type Rendered = { readonly text: string; readonly items: readonly LeadIte
  */
 export const renderBatch = (
   batch: readonly LeadItem[],
-  opts: { readonly bot: string; readonly generation: number; readonly notAnAnswer: boolean },
+  opts: { readonly bot: string; readonly generation: number },
 ): Rendered => {
-  const parts: string[] = opts.notAnAnswer ? [NOT_AN_ANSWER] : [];
+  const parts: string[] = [];
   const items: LeadItem[] = [];
   for (const item of batch) {
     const head = header(item, item.generation !== null && item.generation < opts.generation);
@@ -74,19 +73,33 @@ const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g
 const tokensIn = (text: string, ids: readonly string[]): Set<string> =>
   new Set(ids.filter((id) => new RegExp(`(?:^|\\n)(?:[>❯] ?)?\\[INBOX#${escapeRegex(id)}\\] `).test(text)));
 
-/** The text of every user message in a `read --messages` answer; undefined when the JSON did not arrive whole. */
-const userTexts = (raw: string): string | undefined => {
-  let parsed: unknown;
+/** One transcript read into a file: `tail` entries (all of them when absent), user-visible messages or every entry. */
+export type ReadTranscript = (opts: { readonly tail?: number; readonly messages: boolean }) => Promise<string>;
+
+const TAIL = 200;
+
+const listOf = (raw: string, key: "messages" | "entries"): unknown[] | undefined => {
   try {
-    parsed = JSON.parse(raw.trim().split("\n").at(-1) ?? "");
+    const list = (JSON.parse(raw.trim().split("\n").at(-1) ?? "") as Record<string, unknown> | null)?.[key];
+    return Array.isArray(list) ? list : undefined;
   } catch {
     return undefined;
   }
-  const messages = (parsed as { messages?: unknown } | null)?.messages;
-  if (!Array.isArray(messages)) return undefined;
-  return messages
-    .filter((m: { role?: unknown }) => m?.role === "user")
-    .flatMap((m: { content?: unknown }) =>
+};
+
+/** The transcript tail, asking for half as many entries until the JSON arrives whole; undefined when none does. */
+export const readTail = async (read: ReadTranscript, messages: boolean): Promise<unknown[] | undefined> => {
+  for (let n = TAIL; n >= 1; n = Math.floor(n / 2)) {
+    const list = listOf(await read({ tail: n, messages }), messages ? "messages" : "entries");
+    if (list !== undefined) return list;
+  }
+  return undefined;
+};
+
+const userTexts = (messages: readonly unknown[]): string =>
+  messages
+    .filter((m): m is { content?: unknown } => (m as { role?: unknown } | null)?.role === "user")
+    .flatMap((m) =>
       typeof m.content === "string"
         ? [m.content]
         : Array.isArray(m.content)
@@ -96,25 +109,36 @@ const userTexts = (raw: string): string | undefined => {
           : [],
     )
     .join("\n");
-};
-
-const TAIL = 200;
 
 /**
- * Delivery tokens of `ids` in the lead's transcript: a host session's `read --messages`, asking for half as many
- * messages until the JSON arrives whole; any other runtime's screen.
+ * Delivery tokens of `ids` in the lead's transcript (a host session's user messages; any other runtime's screen). A
+ * token missing from the tail counts as absent only after a full read: `--tail` counts every transcript entry, so
+ * after a restart a short tail missed a delivered token (spike S1, check e). undefined: the full read did not parse.
  */
 export const transcriptTokens = async (
   hosted: boolean,
   ids: readonly string[],
-  read: { readonly screen: () => Promise<string>; readonly messages: (tail: number) => Promise<string> },
-): Promise<Set<string>> => {
+  read: { readonly screen: () => Promise<string>; readonly transcript: ReadTranscript },
+): Promise<Set<string> | undefined> => {
   if (!hosted) return tokensIn(await read.screen(), ids);
-  for (let n = TAIL; n >= 1; n = Math.floor(n / 2)) {
-    const text = userTexts(await read.messages(n));
-    if (text !== undefined) return tokensIn(text, ids);
-  }
-  return new Set();
+  const found = tokensIn(userTexts((await readTail(read.transcript, true)) ?? []), ids);
+  if (ids.every((id) => found.has(id))) return found;
+  const whole = listOf(await read.transcript({ messages: true }), "messages");
+  return whole === undefined ? undefined : tokensIn(userTexts(whole), ids);
+};
+
+/** The newest compaction entry (`type: "compaction"`) of a transcript tail. */
+export const lastCompaction = (
+  entries: readonly unknown[],
+): { readonly id: string; readonly at: string } | undefined => {
+  const found = entries.filter(
+    (e): e is { id: string; timestamp: string } =>
+      (e as { type?: unknown } | null)?.type === "compaction" &&
+      typeof (e as { id?: unknown }).id === "string" &&
+      typeof (e as { timestamp?: unknown }).timestamp === "string",
+  );
+  const last = found.at(-1);
+  return last === undefined ? undefined : { id: last.id, at: last.timestamp };
 };
 
 export type HostStatus = { readonly ready: boolean; readonly pid: number | null; readonly startedAt: string | null };
