@@ -41,12 +41,11 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
     return { code: r.code, out: r.stdout, err: r.stderr } satisfies Ran;
   };
   /**
-   * `read` as the pump's file reader gets it (`undefined` = a full read). `cut` stands in for a pipe that stops at
-   * that many bytes; `tailBlind` for a tail that counts bookkeeping entries and so holds no message at all.
+   * `read` as the pump's file reader gets it: a non-zero exit throws with the output, as cli-lead-pump's reader does.
+   * `cut` stands in for a pipe that stops at that many bytes.
    */
-  const reads: (number | undefined)[] = [];
+  const reads: number[] = [];
   let cut = Number.POSITIVE_INFINITY;
-  let tailBlind = false;
   const writeLead = (over: Partial<LeadState> = {}): void =>
     writeLeadState(dir, {
       bot: "omo",
@@ -71,14 +70,9 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
       host: async () => parseHostStatus((await runner(["omo", "host", "status", "--json"])).out),
       transcript: async (id, { tail, messages }) => {
         reads.push(tail);
-        if (tail !== undefined && tailBlind) return JSON.stringify({ action: "read", messages: [], entries: [] });
-        const argv = [
-          "read",
-          id,
-          ...(messages ? ["--messages"] : []),
-          ...(tail === undefined ? [] : ["--tail", String(tail)]),
-        ];
-        const r = await runner(["omo", "host", "session", ...argv, "--json"]);
+        const argv = ["read", id, ...(messages ? ["--messages"] : []), "--tail", String(tail), "--json"];
+        const r = await runner(["omo", "host", "session", ...argv]);
+        if (r.code !== 0) throw new Error(`omo host session read exited ${r.code}: ${r.out || r.err}`);
         return r.out.slice(0, cut);
       },
       run: runner,
@@ -102,9 +96,6 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
     },
     setHookCode: (code: number) => {
       hookCode = code;
-    },
-    setTailBlind: (on: boolean) => {
-      tailBlind = on;
     },
     setCut: (bytes: number) => {
       cut = bytes;

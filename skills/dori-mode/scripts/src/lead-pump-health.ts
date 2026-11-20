@@ -61,7 +61,7 @@ export type HealthInput = {
   readonly runtime: SessionRuntime | undefined;
   readonly host: HostStatus | null;
   readonly watch: Watch;
-  readonly seen: (ref: SessionRef, ids: readonly string[]) => Promise<Set<string> | undefined>;
+  readonly seen: (ref: SessionRef, ids: readonly string[]) => Promise<Set<string>>;
 };
 
 const activityOf = async (h: HealthInput): Promise<NonNullable<Health["lead"]>["activity"]> => {
@@ -83,8 +83,8 @@ const steerStuck = async (h: HealthInput): Promise<boolean> => {
       h.ref,
       overdue.map(([, s]) => s.id),
     );
-    for (const [seq, s] of overdue) if (found?.has(s.id)) h.watch.steered.delete(seq);
-    return overdue.some(([, s]) => !found?.has(s.id));
+    for (const [seq, s] of overdue) if (found.has(s.id)) h.watch.steered.delete(seq);
+    return overdue.some(([, s]) => !found.has(s.id));
   } catch (e) {
     h.watch.lastError = `stuck check: ${e instanceof Error ? e.message : String(e)}`.slice(0, 300);
     return true;

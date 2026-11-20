@@ -73,8 +73,11 @@ const escapeRegex = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g
 const tokensIn = (text: string, ids: readonly string[]): Set<string> =>
   new Set(ids.filter((id) => new RegExp(`(?:^|\\n)(?:[>❯] ?)?\\[INBOX#${escapeRegex(id)}\\] `).test(text)));
 
-/** One transcript read into a file: `tail` entries (all of them when absent), user-visible messages or every entry. */
-export type ReadTranscript = (opts: { readonly tail?: number; readonly messages: boolean }) => Promise<string>;
+/** One transcript read into a file: the last `tail` user-visible messages, or the last `tail` entries of every kind. */
+export type ReadTranscript = (opts: { readonly tail: number; readonly messages: boolean }) => Promise<string>;
+
+/** host_unavailable or transport_gone: the call never reached a working host, or lost it. */
+export const unreachable = (text: string): boolean => /\b(host_unavailable|transport_gone)\b/.test(text);
 
 const TAIL = 200;
 
@@ -87,10 +90,20 @@ const listOf = (raw: string, key: "messages" | "entries"): unknown[] | undefined
   }
 };
 
-/** The transcript tail, asking for half as many entries until the JSON arrives whole; undefined when none does. */
+/**
+ * The transcript tail, asking for half as many entries until the JSON arrives whole; undefined when none does. A read
+ * that fails (killed at its timeout) counts as one that did not parse; an unreachable host is thrown to the caller.
+ */
 export const readTail = async (read: ReadTranscript, messages: boolean): Promise<unknown[] | undefined> => {
   for (let n = TAIL; n >= 1; n = Math.floor(n / 2)) {
-    const list = listOf(await read({ tail: n, messages }), messages ? "messages" : "entries");
+    let raw: string;
+    try {
+      raw = await read({ tail: n, messages });
+    } catch (e) {
+      if (unreachable(e instanceof Error ? e.message : String(e))) throw e;
+      continue;
+    }
+    const list = listOf(raw, messages ? "messages" : "entries");
     if (list !== undefined) return list;
   }
   return undefined;
@@ -111,20 +124,17 @@ const userTexts = (messages: readonly unknown[]): string =>
     .join("\n");
 
 /**
- * Delivery tokens of `ids` in the lead's transcript (a host session's user messages; any other runtime's screen). A
- * token missing from the tail counts as absent only after a full read: `--tail` counts every transcript entry, so
- * after a restart a short tail missed a delivered token (spike S1, check e). undefined: the full read did not parse.
+ * Delivery tokens of `ids` in the lead's transcript: a host session's `read --messages --tail` (a token absent from it
+ * is absent: spike S1 check e found `--messages --tail 40` returned a delivered token that a plain `--tail 40`
+ * missed), any other runtime's screen. A tail that never parses finds nothing.
  */
 export const transcriptTokens = async (
   hosted: boolean,
   ids: readonly string[],
   read: { readonly screen: () => Promise<string>; readonly transcript: ReadTranscript },
-): Promise<Set<string> | undefined> => {
+): Promise<Set<string>> => {
   if (!hosted) return tokensIn(await read.screen(), ids);
-  const found = tokensIn(userTexts((await readTail(read.transcript, true)) ?? []), ids);
-  if (ids.every((id) => found.has(id))) return found;
-  const whole = listOf(await read.transcript({ messages: true }), "messages");
-  return whole === undefined ? undefined : tokensIn(userTexts(whole), ids);
+  return tokensIn(userTexts((await readTail(read.transcript, true)) ?? []), ids);
 };
 
 /** The newest compaction entry (`type: "compaction"`) of a transcript tail. */

@@ -7,7 +7,7 @@ import { type DeliverOutcome, parseRef, type Probe, type SessionRef } from "../.
 import type { LeadItem } from "./lead-inbox.ts";
 import { pumpHealth, readSeed, type Watch, writeHealth } from "./lead-pump-health.ts";
 import { type PumpDeps, runAcceptedHook, SysItems } from "./lead-pump-sys.ts";
-import { renderBatch, TEXT_CAP, transcriptTokens, WAKE } from "./lead-pump-text.ts";
+import { renderBatch, TEXT_CAP, transcriptTokens, unreachable, WAKE } from "./lead-pump-text.ts";
 import { type LeadState, LeadStateError, readLeadState } from "./lead-state.ts";
 
 const BATCH_ITEMS = 20;
@@ -18,7 +18,6 @@ const BACKOFF_S = [5, 15, 30, 60] as const;
 export class RetiredLeadError extends Error {}
 
 const message = (e: unknown): string => (e instanceof Error ? e.message : String(e));
-const unreachable = (text: string): boolean => /\b(host_unavailable|transport_gone)\b/.test(text);
 const seqsOf = (items: readonly LeadItem[]): number[] => items.map((i) => i.seq);
 
 export class LeadPump {
@@ -112,7 +111,7 @@ export class LeadPump {
     return unreachable(message(e)) ? this.backoff(message(e)) : this.fail(message(e));
   }
 
-  private readonly seen = (ref: SessionRef, ids: readonly string[]): Promise<Set<string> | undefined> =>
+  private readonly seen = (ref: SessionRef, ids: readonly string[]): Promise<Set<string>> =>
     transcriptTokens(ref.runtime === "omo-host", ids, {
       screen: () => this.d.runtimes.for(ref).read(ref, 400),
       transcript: (opts) => this.d.transcript(ref.id, opts),
@@ -122,7 +121,7 @@ export class LeadPump {
   private async settleAmbiguous(ref: SessionRef): Promise<boolean> {
     const rows = this.d.inbox.list("ambiguous").filter((r) => !this.givenUp.has(r.seq));
     if (rows.length === 0) return true;
-    let found: Set<string> | undefined;
+    let found: Set<string>;
     try {
       found = await this.seen(
         ref,
@@ -131,8 +130,6 @@ export class LeadPump {
     } catch (e) {
       return this.failed(e);
     }
-    if (found === undefined)
-      return this.fail(`lead ${ref.id} transcript did not read whole; ${rows.length} item(s) kept`);
     await this.accept(rows.filter((r) => found.has(r.id)));
     for (const r of rows.filter((x) => !found.has(x.id))) {
       if (r.attempts < 2) this.d.inbox.mark([r.seq], "queued");
@@ -167,6 +164,7 @@ export class LeadPump {
       inbox.release(seqsOf(items));
       return probe.status !== "gone" || this.fail(`lead session ${ref.id} is unknown to its ${ref.runtime} runtime`);
     }
+    inbox.attempted(seqsOf(items));
     let out: DeliverOutcome;
     try {
       out = await rt.deliver(ref, text, { when: "any" });
@@ -183,17 +181,17 @@ export class LeadPump {
         await this.accept(items, out.started === false);
         return true;
       case "not-ready":
-        this.d.inbox.release(seqsOf(items));
+        this.d.inbox.release(seqsOf(items), true);
         return out.status === "working" || this.fail(`lead session ${ref.id} not ready (${out.status})`);
       case "no-agent":
-        this.d.inbox.release(seqsOf(items));
+        this.d.inbox.release(seqsOf(items), true);
         return this.fail(`lead session ${ref.id} is gone`);
       case "typed":
         this.d.inbox.mark(seqsOf(items), "ambiguous");
         return this.fail(`text typed into lead ${ref.id} but not submitted`);
       case "ambiguous": {
         if (/\bhost_unavailable\b/.test(out.detail)) {
-          this.d.inbox.release(seqsOf(items));
+          this.d.inbox.release(seqsOf(items), true);
           return this.backoff(out.detail);
         }
         if (out.failure !== "steer parked") {

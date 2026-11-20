@@ -24,10 +24,10 @@ export const bounded =
 /** `read` straight into a file: a pipe would cut the JSON line at 64 KiB. */
 const readToFile =
   (dir: string) =>
-  async (id: string, opts: { readonly tail?: number; readonly messages: boolean }): Promise<string> => {
+  async (id: string, opts: { readonly tail: number; readonly messages: boolean }): Promise<string> => {
     const file = join(dir, `.read-${process.pid}.json`);
-    const tail = opts.tail === undefined ? [] : ["--tail", String(opts.tail)];
-    const argv = ["host", "session", "read", id, ...(opts.messages ? ["--messages"] : []), ...tail, "--json"];
+    const shown = opts.messages ? ["--messages"] : [];
+    const argv = ["host", "session", "read", id, ...shown, "--tail", String(opts.tail), "--json"];
     const p = Bun.spawn(["omo", ...argv], { stdout: Bun.file(file), stderr: "pipe", timeout: CALL_MS });
     const [code, err] = await Promise.all([p.exited, new Response(p.stderr).text()]);
     const out = readFileSync(file, "utf8");

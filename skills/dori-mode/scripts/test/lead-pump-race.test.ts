@@ -64,16 +64,40 @@ test("host_unavailable at the prompt twice, then the host answers: delivered exa
   expect(rig.inbox.list().map((i) => [i.id, i.state, i.attempts])).toEqual([["d:1", "done", 1]]);
 });
 
-test("a token the tail cannot show is looked for in a full read before the item counts as undelivered", async () => {
+test("an unreadable transcript never stalls the queue: the ambiguous item is resent once, the next one delivered", async () => {
+  rig.host.hangNext.set("prompt", "before");
   rig.put("d:1");
-  const sent = rig.inbox.list("queued")[0];
-  if (sent) rig.inbox.mark([sent.seq], "sent");
-  rig.said("[INBOX#d:1] kind=report source=lane-x\n  | body of d:1");
-  rig.setTailBlind(true);
-  await rig.pump().tick();
-  expect(rig.reads).toEqual([200, undefined]);
-  expect(rig.texts("prompt")).toHaveLength(0);
-  expect(rig.inbox.list("done").map((i) => i.id)).toEqual(["d:1"]);
+  const pump = rig.pump();
+  await pump.tick();
+  expect(rig.inbox.list("ambiguous").map((i) => i.id)).toEqual(["d:1"]);
+  rig.setBefore((argv) => {
+    if (argv.includes("read")) rig.host.hangNext.set("read", "before");
+  });
+  rig.put("d:2");
+  for (let n = 0; n < 10; n += 1) {
+    rig.clock.at += 61_000;
+    await pump.tick();
+  }
+  expect(rig.texts("prompt")).toHaveLength(2);
+  expect([rig.sends("d:1"), rig.sends("d:2")]).toEqual([2, 1]);
+  expect(rig.inbox.list().map((i) => [i.id, i.state])).toEqual([
+    ["d:1", "done"],
+    ["d:2", "done"],
+  ]);
+  expect(rig.health()["lead"]).toMatchObject({ stuck: false });
+});
+
+test("a pump that died between taking a batch and calling the lead has not used up the item's one resend", async () => {
+  rig.put("d:1");
+  rig.inbox.take(20, 8192, 1);
+  rig.host.hangNext.set("prompt", "before");
+  const pump = rig.pump();
+  await pump.tick();
+  expect(rig.inbox.list("ambiguous").map((i) => [i.id, i.attempts])).toEqual([["d:1", 1]]);
+  rig.clock.at += 2_000;
+  await pump.tick();
+  expect(rig.texts("prompt")).toHaveLength(2);
+  expect(rig.inbox.list().map((i) => [i.id, i.state, i.attempts])).toEqual([["d:1", "done", 2]]);
 });
 
 test("a compaction in an idle first-prompt lead's transcript gives one rules refresh; a second scan adds none", async () => {

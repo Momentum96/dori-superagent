@@ -155,11 +155,11 @@ export class LeadInbox {
   /**
    * The pump's batch, taken and marked in one immediate transaction so an edit (put with replaces) lands either before
    * it, and the lead gets the new body, or after it, as its own item: `sys:` items first, then nextBatch, each moved
-   * to sent for `generation` (sent_at stamped, one more attempt) only while still queued. The rows as read.
+   * to sent for `generation` (sent_at stamped) only while still queued. The rows as read; no attempt is counted yet.
    */
   take(maxItems: number, maxBytes: number, generation: number): LeadItem[] {
     const sent = this.db.query(
-      "UPDATE items SET state = 'sent', sent_at = $at, attempts = attempts + 1, generation = $g WHERE seq = $seq AND state = 'queued'",
+      "UPDATE items SET state = 'sent', sent_at = $at, generation = $g WHERE seq = $seq AND state = 'queued'",
     );
     return this.db
       .transaction((): LeadItem[] => {
@@ -173,11 +173,16 @@ export class LeadInbox {
       .immediate();
   }
 
-  /** The call never reached the lead (busy, host down): back to queued with that attempt uncounted. */
-  release(seqs: readonly number[]): number {
+  /** The pump is about to call the lead with these items: one more attempt each. */
+  attempted(seqs: readonly number[]): number {
+    return this.each("UPDATE items SET attempts = attempts + 1 WHERE seq = $seq", seqs);
+  }
+
+  /** Back to queued, unsent; `counted`: the call was made but never reached the lead (busy, host down), so uncount it. */
+  release(seqs: readonly number[], counted = false): number {
     const sql =
-      "UPDATE items SET state = 'queued', attempts = MAX(attempts - 1, 0) WHERE seq = $seq AND state = 'sent'";
-    return this.each(sql, seqs);
+      "UPDATE items SET state = 'queued', attempts = MAX(attempts - $d, 0) WHERE seq = $seq AND state = 'sent'";
+    return this.each(sql, seqs, { d: counted ? 1 : 0 });
   }
 
   /** The lead has the items: done and accepted. */
