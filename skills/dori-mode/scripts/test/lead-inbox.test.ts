@@ -54,35 +54,31 @@ test("nextBatch takes queued items in seq order within maxItems and maxBytes, th
     inbox.close();
   }));
 
-test(
-  "two processes putting 200 distinct ids each at once leave 400 rows and no error",
-  () =>
-    inState(async (dir) => {
-      const module = join(import.meta.dir, "../src/lead-inbox.ts");
-      const writer = (prefix: string) =>
-        run(
-          [
-            process.execPath,
-            "-e",
-            `const { LeadInbox } = await import(${JSON.stringify(module)});
+test("two processes putting 200 distinct ids each at once leave 400 rows and no error", () =>
+  inState(async (dir) => {
+    const module = join(import.meta.dir, "../src/lead-inbox.ts");
+    const writer = (prefix: string) =>
+      run(
+        [
+          process.execPath,
+          "-e",
+          `const { LeadInbox } = await import(${JSON.stringify(module)});
            const inbox = new LeadInbox(${JSON.stringify(dir)}, "omo", { now: () => Date.now(), sleep: async () => {} });
            for (let i = 0; i < 200; i++) if (inbox.put({ id: "${prefix}:" + i, kind: "event", source: "t", body: "b" }) !== "inserted") process.exit(3);
            inbox.close();`,
-          ],
-          { timeoutMs: 60_000 },
-        );
-      const results = await Promise.all([writer("a"), writer("b")]);
-      expect(results.map((r) => [r.code, r.err])).toEqual([
-        [0, ""],
-        [0, ""],
-      ]);
-      const inbox = new LeadInbox(dir, "omo", fixedClock());
-      expect(inbox.stats()).toMatchObject({ queued: 400, total: 400 });
-      expect(new Set(inbox.list().map((i) => i.seq)).size).toBe(400);
-      inbox.close();
-    }),
-  90_000,
-);
+        ],
+        { timeoutMs: 60_000 },
+      );
+    const results = await Promise.all([writer("a"), writer("b")]);
+    expect(results.map((r) => [r.code, r.err])).toEqual([
+      [0, ""],
+      [0, ""],
+    ]);
+    const inbox = new LeadInbox(dir, "omo", fixedClock());
+    expect(inbox.stats()).toMatchObject({ queued: 400, total: 400 });
+    expect(new Set(inbox.list().map((i) => i.seq)).size).toBe(400);
+    inbox.close();
+  }));
 
 test("replaceBody works while queued and is refused once the item was sent; sent stamps time and attempts", () =>
   inState((dir) => {

@@ -46,7 +46,7 @@ test("dori lead-inbox put answers inserted then duplicate, stats counts one queu
   } finally {
     state.done();
   }
-}, 60_000);
+});
 
 test("dori lead-inbox put --envelope stores channel and message; a broken envelope exits 2", async () => {
   const state = withState();
@@ -62,7 +62,7 @@ test("dori lead-inbox put --envelope stores channel and message; a broken envelo
   } finally {
     state.done();
   }
-}, 60_000);
+});
 
 test("import-spool puts oldest first, deletes only answered files, moves invalid ones to rejected/", () => {
   const state = withState();
@@ -106,7 +106,16 @@ test("dori lead-inbox import-spool runs one pass and refuses a --loop that swall
     const swallowed = await dori(state.dir, ["lead-inbox", "import-spool", "--loop", "--bot", "omo", "--spool", spool]);
     expect(swallowed.code).not.toBe(0);
     expect(readdirSync(spool)).toEqual([]);
+    const missing = await dori(state.dir, [
+      "lead-inbox",
+      "import-spool",
+      "--bot",
+      "omo",
+      "--spool",
+      join(spool, "nope"),
+    ]);
+    expect([missing.code, missing.err]).toEqual([2, `no spool directory ${join(spool, "nope")}`]);
   } finally {
     state.done();
   }
-}, 60_000);
+});

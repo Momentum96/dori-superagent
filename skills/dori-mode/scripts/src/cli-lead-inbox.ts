@@ -1,5 +1,5 @@
 /** dori lead-inbox put|list|stats|import-spool: the lead's inbox from the command line. Refused input exits 2. */
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import { type Cli, type Command, die } from "./cli-context.ts";
@@ -101,7 +101,9 @@ const leadInbox: Command = async (cli) => {
       case "import-spool": {
         // --loop is a bare flag here; a value means it swallowed the next flag (`--loop --bot omo`).
         if (typeof values["loop"] === "string") throw new LeadInboxError("--loop takes no value; put it last");
-        return await spoolLoop(inbox, need("spool"), realClock, values["loop"] !== undefined);
+        const spool = need("spool");
+        if (!existsSync(spool)) throw new LeadInboxError(`no spool directory ${spool}`);
+        return await spoolLoop(inbox, spool, realClock, values["loop"] !== undefined);
       }
       default:
         die("lead-inbox needs put, list, stats or import-spool");
