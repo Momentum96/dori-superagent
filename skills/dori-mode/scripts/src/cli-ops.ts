@@ -1,5 +1,5 @@
 /** dori sync, boot, verify-pr and the host loops: watch, freshness, forward-reports, dead-panes, guard, heavy, can-launch. */
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { bootCheck, envSlackCheck } from "./boot.ts";
 import { gatewayCheck } from "./boot-gateway.ts";
 import { type Command, die, every, slackAuth } from "./cli-context.ts";
@@ -12,7 +12,9 @@ import { Gateway, gatewaySocketPath, unixConnector } from "./messenger/gateway.t
 import { fetchHttp } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
 import { ConfigError } from "./config.ts";
-import { forwarderDeps, forwardTick } from "./report-forwarder.ts";
+import { LeadInboxError, parseBot } from "./lead-envelope.ts";
+import { Registry } from "./registry.ts";
+import { forwarderDeps, forwardTick, localInboxArgv } from "./report-forwarder.ts";
 import { Reports } from "./reports.ts";
 import { canLaunch } from "./routing.ts";
 import { realClock, run } from "./run.ts";
@@ -109,11 +111,17 @@ export const opsCommands: Readonly<Record<string, Command>> = {
     });
   },
   "forward-reports": async ({ values, config, deps }) => {
+    // --state-dir reads another dori home's lane journals (an omp node home); --bot names the local inbox it fills.
+    const stateDir = typeof values["state-dir"] === "string" ? resolve(values["state-dir"]) : config.stateDir;
+    const bot = typeof values["bot"] === "string" ? values["bot"] : undefined;
     const forwarder = (() => {
       try {
-        return forwarderDeps(config, deps.run, deps.registry);
+        if (bot !== undefined) parseBot(bot);
+        const base = forwarderDeps({ ...config, stateDir }, deps.run, new Registry(stateDir));
+        return bot === undefined || config.leadInboxArgv ? base : { ...base, inboxArgv: localInboxArgv(bot) };
       } catch (e) {
         if (e instanceof ConfigError) return die(e.message);
+        if (e instanceof LeadInboxError) return die(e.message, 2);
         throw e;
       }
     })();

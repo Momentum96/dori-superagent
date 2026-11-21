@@ -47,7 +47,9 @@ const USAGE = `dori <command> [options]
   resume <key> [--note TEXT]           undo pause: goal resumed (read back), lane back to its earlier status
   watch                                long-running: emits LANE_* lines every 30 s
   freshness [--loop MIN]               nudge silent lanes, post their last report via hooks.threadReply
-  forward-reports [--once]             hand lane blocker/question/halted/done/stalled records to the lead inbox (leadInboxArgv), each once
+  forward-reports [--once] [--state-dir DIR] [--bot B]
+                                       hand lane blocker/question/halted/done/stalled records to the lead inbox (leadInboxArgv,
+                                       else bot B's local inbox, default omo), each once; DIR = whose lane journals to read
   dead-panes [--loop MIN]              print DEAD_PANE <id> for stopped agent panes
   guard [--loop MIN]                   host load, memory, disk and pane-count alerts
   heavy <label> -- <command ...>       run a heavy command when a slot is free and load is low
@@ -132,6 +134,7 @@ const flags = parseArgs({
     state: { type: "string" },
     json: { type: "boolean" },
     spool: { type: "string" },
+    "state-dir": { type: "string" },
     rules: { type: "string" },
     runtime: { type: "string" },
     once: { type: "boolean" },

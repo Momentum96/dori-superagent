@@ -39,14 +39,14 @@ const ACKS: ReadonlySet<string> = new Set(["spooled", "inserted", "duplicate"]);
 const acknowledged = (ran: Ran): boolean => ran.code === 0 && ACKS.has(ran.out.trim().split("\n").at(-1)?.trim() ?? "");
 const NEWLINE = 0x0a;
 
-/** The omo lead's inbox on this machine: the lead-inbox command of this same CLI, under the same DORI_CONFIG. */
-const localInboxArgv = (): string[] => [
+/** A bot's lead inbox on this machine: the lead-inbox command of this same CLI, under the same DORI_CONFIG. */
+export const localInboxArgv = (bot = "omo"): string[] => [
   process.execPath,
   fileURLToPath(new URL("./cli.ts", import.meta.url)),
   "lead-inbox",
   "put",
   "--bot",
-  "omo",
+  bot,
   "--envelope",
 ];
 
