@@ -160,6 +160,19 @@ test("a malformed lead.json: no host call, the reason in health", async () => {
   expect(rig.health()["lead"]).toBeNull();
 });
 
+test("a later delivery clears the last error from health", async () => {
+  writeFileSync(join(state.dir, "lead", "omo.json"), "{}");
+  rig.put("d:1");
+  const pump = rig.pump();
+  await pump.tick();
+  expect(rig.health()["inbox"]?.["lastError"]).toMatch(/lead state/);
+  rig.writeLead();
+  rig.clock.at += 30_000;
+  await pump.tick();
+  expect(rig.inbox.list("done").map((i) => i.id)).toEqual(["d:1"]);
+  expect(rig.health()["inbox"]).toMatchObject({ lastError: null, lastDeliveredAt: "2026-11-21T02:00:30.000Z" });
+});
+
 test("a lead whose rules came in its first prompt gets a rules refresh at 04:00 and after a host restart", async () => {
   rig.writeLead({ rules: "first-prompt", rulesFile: "/lead/RULES.md" });
   const pump = rig.pump();

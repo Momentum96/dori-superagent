@@ -211,12 +211,16 @@ export class LeadPump {
     }
   }
 
-  /** Done and accepted (a steered item is watched for its token); hooks.inboxAccepted runs once per item. */
+  /**
+   * Done and accepted (a steered item is watched for its token); hooks.inboxAccepted runs once per item. A delivery
+   * clears the last error, so health shows only errors since the last item that got through.
+   */
   private async accept(items: readonly LeadItem[], steered = false): Promise<void> {
     if (items.length === 0) return;
     this.d.inbox.accept(seqsOf(items));
     for (const i of steered ? items : []) this.watch.steered.set(i.seq, { id: i.id, at: this.d.clock.now() });
     this.watch.lastDeliveredAt = new Date(this.d.clock.now()).toISOString();
+    this.watch.lastError = null;
     if (this.d.hookArgv === undefined) return;
     for (const why of await runAcceptedHook(this.d.run, this.d.hookArgv, items)) this.fail(why);
   }
