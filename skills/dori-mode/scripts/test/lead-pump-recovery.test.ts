@@ -67,6 +67,22 @@ test("T2.8 a prompt killed at the timeout after the host took it: never sent aga
   expect(rig.inbox.list("done").map((i) => i.id)).toEqual(["d:1"]);
 });
 
+test("a deliver that throws after the lead took the text: the batch is ambiguous, never requeued or sent again", async () => {
+  rig.setDeliverFault(async (_ref, text) => {
+    rig.said(text);
+    throw new Error("socket closed before the reply");
+  });
+  rig.put("d:1");
+  const pump = rig.pump();
+  await pump.tick();
+  expect(rig.inbox.list("ambiguous").map((i) => i.id)).toEqual(["d:1"]);
+  rig.setDeliverFault(undefined);
+  rig.clock.at += 2_000;
+  await pump.tick();
+  expect(rig.sends("d:1")).toBe(0);
+  expect(rig.inbox.list("done").map((i) => [i.id, i.attempts])).toEqual([["d:1", 1]]);
+});
+
 test("every call the pump makes is bounded at 120 s", async () => {
   const seen: (number | undefined)[] = [];
   await bounded(async (_argv, opts) => {

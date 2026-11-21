@@ -32,25 +32,28 @@ test("--state-dir reads another home's journals and --bot fills that bot's local
   new Reports(node).report("omp-check", "done", "finished", T0);
   const config = join(state.dir, "config.json");
   writeFileSync(config, JSON.stringify({ stateDir: lead, machine: "hosthatch" }));
-  const cli = (...args: string[]) => {
+  /** One CLI run, settled: both pipes drained and the exit awaited, so no child outlives its step. */
+  const cli = async (...args: string[]) => {
     const env: Record<string, string | undefined> = { ...process.env, DORI_CONFIG: config };
     delete env["DORI_STATE_DIR"];
-    return Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "cli.ts"), ...args], {
+    const proc = Bun.spawn([process.execPath, join(import.meta.dir, "..", "src", "cli.ts"), ...args], {
       env,
       stdout: "pipe",
       stderr: "pipe",
     });
+    const [out] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+    return { code: await proc.exited, out };
   };
   // When forward-reports runs once with both options
-  const fwd = cli("forward-reports", "--once", "--state-dir", node, "--bot", "omp");
-  expect(await new Response(fwd.stdout).text()).toContain("FORWARDED omp-check r:hosthatch:omp-check:0 done");
-  expect(await fwd.exited).toBe(0);
+  const fwd = await cli("forward-reports", "--once", "--state-dir", node, "--bot", "omp");
+  expect(fwd.out).toContain("FORWARDED omp-check r:hosthatch:omp-check:0 done");
+  expect(fwd.code).toBe(0);
   // Then the omp inbox in the config's state holds the item, and the cursor lives in the node home
-  const list = cli("lead-inbox", "list", "--bot", "omp", "--json");
-  const rows = JSON.parse(await new Response(list.stdout).text()) as { id: string }[];
+  const list = await cli("lead-inbox", "list", "--bot", "omp", "--json");
+  const rows = JSON.parse(list.out) as { id: string }[];
   expect(rows.map((r) => r.id)).toEqual(["r:hosthatch:omp-check:0"]);
   expect(existsSync(join(node, "forwarder", "cursors.json"))).toBe(true);
   expect(existsSync(join(lead, "forwarder"))).toBe(false);
   // And a bad bot name is refused before anything is sent
-  expect(await cli("forward-reports", "--once", "--state-dir", node, "--bot", "Bad Bot").exited).toBe(2);
-}, 15_000);
+  expect((await cli("forward-reports", "--once", "--state-dir", node, "--bot", "Bad Bot")).code).toBe(2);
+});

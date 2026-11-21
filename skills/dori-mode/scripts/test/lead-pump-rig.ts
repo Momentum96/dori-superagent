@@ -9,6 +9,7 @@ import { LeadPump } from "../src/lead-pump.ts";
 import { parseHostStatus } from "../src/lead-pump-text.ts";
 import { type LeadState, writeLeadState } from "../src/lead-state.ts";
 import type { Ran, Runner } from "../src/run.ts";
+import type { SessionRuntime } from "../../../../src/runtime/types.ts";
 import { runtimesFor } from "../src/run.ts";
 import { fakeClock } from "./fakes.ts";
 import { type HcWorld, hcAnswer } from "./hc-runner.ts";
@@ -46,6 +47,16 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
    */
   const reads: number[] = [];
   let cut = Number.POSITIVE_INFINITY;
+  /** Stands in for the lead runtime's own deliver (a runtime whose deliver throws instead of answering an outcome). */
+  let deliverFault: SessionRuntime["deliver"] | undefined;
+  const withFault = (rt: SessionRuntime): SessionRuntime =>
+    new Proxy(rt, {
+      get: (t, p) => {
+        if (p === "deliver" && deliverFault !== undefined) return deliverFault;
+        const v: unknown = Reflect.get(t, p);
+        return typeof v === "function" ? v.bind(t) : v;
+      },
+    });
   const writeLead = (over: Partial<LeadState> = {}): void =>
     writeLeadState(dir, {
       bot: "omo",
@@ -66,7 +77,10 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
       bot: "omo",
       clock,
       inbox,
-      runtimes: runtimesFor({ runtime: "hc", leadRuntime: "omo-host" }, {}, runner, clock),
+      runtimes: (() => {
+        const rts = runtimesFor({ runtime: "hc", leadRuntime: "omo-host" }, {}, runner, clock);
+        return { for: (ref: Parameters<typeof rts.for>[0]) => withFault(rts.for(ref)) };
+      })(),
       host: async () => parseHostStatus((await runner(["omo", "host", "status", "--json"])).out),
       transcript: async (id, { tail, messages }) => {
         reads.push(tail);
@@ -99,6 +113,9 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
     },
     setCut: (bytes: number) => {
       cut = bytes;
+    },
+    setDeliverFault: (f: SessionRuntime["deliver"] | undefined) => {
+      deliverFault = f;
     },
     put: (id: string, body = `body of ${id}`, extra: { channel?: string; message?: string } = {}) =>
       inbox.put({ id, kind: "report", source: "lane-x", body, ...extra }),
