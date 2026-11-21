@@ -22,7 +22,7 @@ Each piece of work gets its own thread (or topic) with:
 - one status message you edit in place: `working: <work> · <time elapsed>` while working, `done: <work>` when done;
 - a status word at the start of the thread name: `[working]`, `[waiting]` (on the owner or someone else), `[done]`.
 
-When the work is done, remove your "eyes" reaction and close (archive) the thread. If the owner writes in a closed thread, reopen it, set it back to `[working]`, and carry on there. Threads the owner started get the same treatment.
+When the work is done, close (archive) the thread. Leave your "eyes" reaction on the message; it stays after you reply. If the owner writes in a closed thread, reopen it, set it back to `[working]`, and carry on there. Threads the owner started get the same treatment.
 
 ## Files
 
