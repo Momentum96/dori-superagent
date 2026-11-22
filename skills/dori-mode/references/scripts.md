@@ -43,7 +43,6 @@ Needs: bun 1.3+, herdr or hc, git, and the GitHub CLI (`gh`) for `merged`/`close
 | `hooks.leadAlert` | none | `lead replace`: post one line to the status channel, `{text}`; without it the line is only printed as `ALERT ...` on stderr |
 | `supervision` | no ceilings by default (set wallMinutes, tokens or costUsd to enable); hung after 20 min | `freshness`, `launch`, `close` (see Supervision below) |
 | `repoIdentities` | none | `verify-pr`, `launch` footer: expected Git name and email per `owner/repo` (keys match without case) |
-| `gateway.socket` | `/run/dori-gateway/dori.sock` | `send gateway`, `inbound gateway`, `boot`: the dori.bot surface's local socket (no token); `DORI_GATEWAY_SOCKET` overrides it |
 
 Hooks are argv templates for your messenger CLI. `{thread}`, `{text}` and `{key}` are filled into each argument separately, so the text stays one argument whatever it contains.
 
@@ -62,8 +61,6 @@ The CLI is a thin layer over typed modules you can import in your own scripts:
 | `src/messenger/slack-inbound.ts` | `pollSlackInbound`: threads view, the ledger's threads and unread counts, deduplicated, own messages filtered |
 | `src/messenger/telegram-inbound.ts` | `pollTelegramInbound`: owner-gated `getUpdates` long-poll, persisted offset, DMs and the group gate |
 | `src/messenger/slack-presence.ts` | `slackPresence`: hold a user account active |
-| `src/messenger/gateway.ts` | `Gateway`: the dori.bot surface over a local socket: post, edit, status rows, questions, receipts (each with an `op_id` reused on retry) and the inbound subscription; frames in `gateway-frames.ts` and `references/gateway-socket.md` |
-| `src/surface-rules.ts` | `loadSurfaceRules`: the rule ids of a surface's rules file under `rules/` (the dori.bot surface: `rules/dori-bot.md`) |
 | `src/routing.ts` | `canLaunch`, `idleLaneFor`: the routing checks |
 
 Every module takes its HTTP, clock and timers as arguments. That is how the tests run without the network.
@@ -170,9 +167,6 @@ Prints `CAN_LAUNCH` and exits 0 when the host has room for another lane. Otherwi
 ### `dori send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]`
 Posts a message, or edits one with `--edit`. Tokens come from `DORI_SLACK_TOKEN`, or when that is unset or empty from the file `DORI_SLACK_TOKEN_FILE` names (plus `DORI_SLACK_COOKIE` for a user token). The file must be a regular file you own and owner-only (`chmod 600`), checked and read through one open descriptor; a file open to group or others, owned by someone else, not a regular file (a FIFO never blocks the read), missing or empty is refused. Windows has no mode bits or uid to check, so there the file's ACL is the owner's to set, and `dori boot` prints `SLACK token-file: the token file's NTFS ACL is not checked on Windows; ...` as a reminder. Other tokens come from `DORI_TELEGRAM_TOKEN` or `DORI_DISCORD_TOKEN`. Text containing `$(` is refused, since it can only come from a shell string. Rate limits are retried with the server's wait time; other errors fail at once.
 
-### `dori send gateway --text TEXT [--edit ID]`, `--status ...`, `--question ...`, `--receipt ...`
-The dori.bot surface on a Dori VM: post, edit in place, a status row with work rows, a question with options, a receipt. It writes to the gateway's local socket and needs no token. A send the gateway cannot take yet is retried with the same `op_id`; when the backoff is spent it exits non-zero with `gateway_unavailable`. Frames, flags and printed lines: `gateway-socket.md`. The rules for this surface, including when to ask the user before acting, are in `../rules/dori-bot.md`.
-
 ### `dori presence <slack|discord>`
 Keeps the account shown as online until stopped.
 - **Discord:** the bot connects to the gateway and identifies as online.
@@ -186,9 +180,6 @@ Prints `INBOUND <source> <channel> <thread> <ts> <user> <text>`. It reads from t
 - `unread`: DMs, group DMs and channels with unread mentions.
 
 The Dori's own messages and bot messages are skipped. Every message the Dori posts records its thread in `<stateDir>/slack-threads.json`, whichever helper sends it, so a guest's untagged reply under a root posted with a raw API call is still found.
-
-### `dori inbound gateway [--session ID] [--session-file PATH]`
-Subscribes to the gateway's local socket as the lead session: its id (`--session`, else `PI_SESSION_ID`) and the absolute path of its session file (`--session-file`, else `PI_SESSION_FILE`), prints `INBOUND_READY gateway`, then `INBOUND gateway <session> - <id> - <text>` per message and `INBOUND gateway:answer <session> <question id> <id> - <text> option=<option id>` per answer, and acks each after printing it. Run it as a persistent monitor of the lead session. A dropped stream is reopened with backoff; it exits with `gateway_unavailable` after five failed connections in a row. With no socket file, `dori boot` prints `GATEWAY skipped (no gateway socket)`.
 
 ### `dori inbound telegram [--loop MIN]`
 Prints `INBOUND <source> <chat> <thread> <update-id> mid=<message_id> <from> <text>[ file=<kind>:<file_id>]`, keeping Slack's field order — `source` is `dm`, `topic`, `edit:dm` or `edit:topic`. `mid=<message_id>` is always present (never optional, so later fields never shift; `-` when unknown) and names the Telegram message behind the line: a new message and the edits that replace it share the same `mid=`, so a consumer can pair an edit with the original line. A media message appends ` file=<kind>:<file_id>` (voice, audio, video, video_note, animation, document, photo); the line carries the `file_id`, which a caller can pass to Telegram's `getFile`. Live-location shares arrive as a stream of edits carrying only coordinates — those are dropped, not one line each. The corrupt-offset WARN prints to stdout, like every other inbound WARN. Without `--loop` the command is exactly one poll and returns, productive or not. Long-polls `getUpdates`:

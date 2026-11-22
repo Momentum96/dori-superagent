@@ -1,14 +1,12 @@
 /** dori sync, boot, verify-pr and the host loops: watch, freshness, forward-reports, dead-panes, guard, heavy, can-launch. */
 import { dirname, join, resolve } from "node:path";
 import { bootCheck, envSlackCheck } from "./boot.ts";
-import { gatewayCheck } from "./boot-gateway.ts";
 import { type Command, die, every, slackAuth } from "./cli-context.ts";
 import { deadPaneTick, newDeadPaneState } from "./dead-panes.ts";
 import { watchTick } from "./done-flow.ts";
 import { freshnessTick } from "./freshness.ts";
 import { acquireSlot, pidAlive, releaseSlot } from "./heavy-slot.ts";
 import { guardTick, sampleHost } from "./host-guard.ts";
-import { Gateway, gatewaySocketPath, unixConnector } from "./messenger/gateway.ts";
 import { fetchHttp } from "./messenger/http.ts";
 import { Slack } from "./messenger/slack.ts";
 import { ConfigError } from "./config.ts";
@@ -36,15 +34,12 @@ const boot: Command = async ({ deps, config }) => {
     process.env["PI_SESSION_DIR"],
     process.env["PI_SESSION_FILE"] && dirname(process.env["PI_SESSION_FILE"]),
   ];
-  const socket = gatewaySocketPath(config.gateway.socket);
   const r = await bootCheck({
     ...deps,
     reports: new Reports(config.stateDir),
     worklog: new Worklog(config.stateDir),
     // A bad token file is a failed boot line, not an exit: boot is the read-only report a fresh lead depends on.
     slack: envSlackCheck((token) => new Slack(fetchHttp, realClock, slackAuth(token))),
-    // No socket file is not a Dori VM: the surface is skipped, as Slack is with no token.
-    gateway: gatewayCheck(new Gateway(unixConnector, realClock, socket), socket),
     monitorDirs: sessionDirs.flatMap((dir) => (dir ? [join(dir, "extensions", "terminal")] : [])),
   });
   for (const line of r.lines) console.log(line);

@@ -49,7 +49,6 @@ Goals follow requests, not the session. When the owner asks for something, set o
 - React to each new message with an "eyes" reaction (a read receipt, the one emoji you use), then handle it. If it is a reply, read the message it replies to first.
 - Answer every owner message within a minute, in its thread: the answer, or one line on what you are doing and when you will be back. While work runs, its thread gets a short progress reply every 15 minutes and at each milestone. Otherwise stay quiet: no FYIs, no confirmations.
 - When the owner asks you to remember something or to tell them when something happens, write it down, set a watch, and tell them at that moment.
-- On a Dori VM (`dori boot` prints `GATEWAY reachable`), the owner talks to you in the dori.bot web chat: run `dori inbound gateway` as the inbound monitor, answer with `dori send gateway`, and follow `rules/dori-bot.md`, which also says when to ask before acting. Socket and frames: `references/gateway-socket.md`.
 
 ## Writing to the owner
 
@@ -112,4 +111,4 @@ Real work runs in its own session, called a lane: a herdr tab, or a labelled ter
 | `dori guard` | host load, memory, disk and pane-count alerts |
 | `dori heavy <label> -- <cmd>` | run a heavy command only when a slot is free and load is low |
 | `dori can-launch` | is there room for a new lane? exit 4 with the reasons if not |
-| `dori send` / `dori presence` / `dori transcribe` | messenger utilities: post or edit on Slack, Telegram, Discord or the dori.bot surface (`gateway`); stay shown online; voice note to text |
+| `dori send` / `dori presence` / `dori transcribe` | messenger utilities: post or edit on Slack, Telegram or Discord; stay shown online; voice note to text |

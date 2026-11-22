@@ -56,16 +56,10 @@ const USAGE = `dori <command> [options]
   can-launch                           exit 0 if the host has room for a new lane, else print why and exit 4
   send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN or the file DORI_SLACK_TOKEN_FILE names, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
-  send gateway --text TEXT [--edit ID] the dori.bot surface over the local socket (DORI_GATEWAY_SOCKET, default /run/dori-gateway/dori.sock)
-  send gateway --status start|update|stop --text TEXT [--status-id ID] [--row running|done|failed:LABEL ...]
-  send gateway --question --text TEXT --option LABEL --option LABEL ...
-  send gateway --receipt TITLE --line LABEL=VALUE ...
   presence <slack|discord>             keep the account shown as online until stopped
   transcribe <audio-file>              run hooks.transcribe and print the text
   inbound slack|telegram [--loop MIN]  print INBOUND lines: Slack unread thread replies / Telegram owner DMs, edits and media + configured topic
                                        the Dori posted in (any helper), DMs and channels with unread mentions
-  inbound gateway [--session ID] [--session-file PATH]
-                                       subscribe as the lead session (default PI_SESSION_ID, PI_SESSION_FILE); print INBOUND lines, ack each
   lead-inbox put --bot B --id ID --kind K --source S   body from stdin; prints inserted or duplicate
   lead-inbox put --bot B --envelope    one JSON object {id,kind,source,body,channel?,message?} on stdin
   lead-inbox list --bot B [--state S] [--json] | stats --bot B [--json]
@@ -126,8 +120,6 @@ const flags = parseArgs({
     option: { type: "string", multiple: true },
     receipt: { type: "string" },
     line: { type: "string", multiple: true },
-    session: { type: "string" },
-    "session-file": { type: "string" },
     bot: { type: "string" },
     id: { type: "string" },
     envelope: { type: "boolean" },

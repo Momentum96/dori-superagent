@@ -55,7 +55,7 @@ Both installs put a command named `dori` on your PATH, so install one per machin
 
 ### Dori mode, the bot you talk to
 
-You need herdr, Bun 1.4.4 or newer, git, and the GitHub CLI `gh`.
+You need herdr, Bun 1.4.5 or newer, git, and the GitHub CLI `gh`.
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/sisyphuslabs/dori-superagent/main/install.sh | bash
@@ -69,7 +69,7 @@ The operating contract is [`skills/dori-mode/SKILL.md`](skills/dori-mode/SKILL.m
 
 ### The harness
 
-You need Bun 1.4.4 or newer, herdr, omo, and `gh` (for PR head SHAs, checks and the merge).
+You need Bun 1.4.5 or newer, herdr, omo, and `gh` (for PR head SHAs, checks and the merge).
 
 ```sh
 git clone https://github.com/sisyphuslabs/dori-superagent

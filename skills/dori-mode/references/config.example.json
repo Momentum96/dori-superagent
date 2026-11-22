@@ -40,9 +40,6 @@
     "diskFreeMinGb": 50,
     "panesMax": 20
   },
-  "gateway": {
-    "socket": "/run/dori-gateway/dori.sock"
-  },
   "hooks": {
     "threadReply": ["my-messenger", "reply", "--thread", "{thread}", "--text", "{text}"],
     "threadDone": ["my-messenger", "set-status", "--thread", "{thread}", "--status", "done", "--note", "{text}"],

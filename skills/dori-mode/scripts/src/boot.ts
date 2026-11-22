@@ -4,7 +4,6 @@ import { shellQuote } from "./launch-footer.ts";
 import type { SessionInfo } from "../../../../src/runtime/types.ts";
 import type { Slack } from "./messenger/slack.ts";
 import { driftCheck, workspaceCheck } from "./boot-checks.ts";
-import { type GatewayCheck, gatewayBootLines } from "./boot-gateway.ts";
 import { type BootLane, finished, monitorCleanup, readMonitorManifests } from "./boot-monitors.ts";
 import { type Lane, statusOf } from "./registry.ts";
 import { reconcilePanes } from "./reconcile.ts";
@@ -25,8 +24,6 @@ export type BootDeps = Pick<FlowDeps, "run" | "registry" | "config" | "clock" | 
   readonly worklog: Worklog;
   /** null when no Slack token is configured; boot then skips the check. */
   readonly slack: SlackCheck;
-  /** The dori.bot surface; absent or null (no socket) = skipped. */
-  readonly gateway?: GatewayCheck;
   readonly monitorDirs?: readonly string[];
   /** How long the Slack step may take; withBackoff alone can retry for minutes. */
   readonly slackDeadlineMs?: number;
@@ -205,13 +202,8 @@ export const bootCheck = async (deps: BootDeps): Promise<{ exitCode: number; lin
       `EXPIRED ${item.lanes.join(",")} match=${item.match.join(",")} ownerSession=${item.sessionId} metadata=${shellQuote(item.metadata)} expiresAt=${new Date(item.expiresAt ?? 0).toISOString()}; nothing to stop`,
     );
   }
-  // The network steps run last, after every local check, and give up at a short deadline.
+  // The network step runs last, after every local check, and gives up at a short deadline.
   const deadlineMs = deps.slackDeadlineMs ?? 10_000;
-  if (deps.gateway) {
-    const gateway = await gatewayBootLines(deps.gateway, deadlineMs);
-    if (gateway.failed) failed = true;
-    lines.push(...gateway.lines);
-  }
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     const auth = await Promise.race([
