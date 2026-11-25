@@ -5,6 +5,7 @@ import type { FlowDeps } from "./done-flow.ts";
 import { laneGoalActive } from "./goal-record.ts";
 import { BRIEF_START, cliCommand, footer, leadReach, originalBrief, quoteForPane } from "./launch-footer.ts";
 import type { Runtimes } from "../../../../src/runtime/registry.ts";
+import type { HostEngine } from "../../../../src/runtime/omo-host/engine.ts";
 import { AGENT_SESSION_KINDS, type SessionRef } from "../../../../src/runtime/types.ts";
 import { LANE_KEY, type Lane, RESERVED_LANE_KEY, sessionFields } from "./registry.ts";
 import { iso, runtimesOf } from "./run.ts";
@@ -25,6 +26,7 @@ export type LaunchInput = {
   readonly thread?: string;
   readonly model?: string;
   readonly cwd?: string;
+  readonly engine?: HostEngine | undefined;
   readonly budget?: BudgetLimits;
   readonly activityPaths?: readonly string[];
 };
@@ -70,8 +72,8 @@ const laneEnv = (): Record<string, string> => {
 };
 // A lane in an agent session (omo-host) runs in the host's environment, not one launch gives it: its env, with this
 // config's absolute path, rides in every dori command its footer names instead.
-const hostedCli = (deps: FlowDeps): string | undefined =>
-  deps.config.laneRuntime !== undefined && AGENT_SESSION_KINDS.has(deps.config.laneRuntime)
+const hostedCli = (deps: FlowDeps, engine: HostEngine | undefined): string | undefined =>
+  engine !== undefined || deps.config.laneRuntime === "omo-host"
     ? cliCommand(undefined, { ...laneEnv(), DORI_CONFIG: resolve(configPath()) })
     : undefined;
 
@@ -117,7 +119,7 @@ export const prepareLaunch = async (
   return {
     lane: draft,
     warnings: problems.map((problem) => `LESSON_WARNING ${problem}`),
-    preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities, hostedCli(deps), leadReach(leadKind(deps), deps.config.leadPane, deps.config.leadInbox))}`,
+    preamble: `${renderLessons(lessons)}${BRIEF_START}\n${originalBrief(await briefFile.text())}\n${footer(draft, deps.config.leadPane, deps.config.repoIdentities, hostedCli(deps, input.engine), leadReach(leadKind(deps), deps.config.leadPane, deps.config.leadInbox))}`,
   };
 };
 
@@ -143,10 +145,12 @@ const startLane = async (
   let hosted: boolean;
   let ref: SessionRef;
   try {
-    hosted = AGENT_SESSION_KINDS.has(rts.lane.kind);
+    const runtime =
+      input.engine === undefined ? rts.lane : rts.for({ runtime: "omo-host", id: "", engine: input.engine });
+    hosted = AGENT_SESSION_KINDS.has(runtime.kind);
     const env = hosted ? {} : laneEnv();
     const spec = { name: input.key, role: "lane", container: "tab", cwd, env, model } as const;
-    ref = await rts.lane.create(group === undefined ? spec : { ...spec, group });
+    ref = await runtime.create(group === undefined ? spec : { ...spec, group });
   } catch (e) {
     if (e instanceof LaunchError) throw e;
     throw new LaunchError(`session create failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -198,7 +202,7 @@ const startupCheck = async (
   if (ready(status) || (unreported(status) && !error)) {
     const marker = deps.config.goalMarker;
     const hasGoal = (shown: string): boolean =>
-      goalShown(shown, marker) || laneGoalActive(deps.config.sessionsDir, cwd, key, started);
+      goalShown(shown, marker) || (ref.engine !== "mhc" && laneGoalActive(deps.config.sessionsDir, cwd, key, started));
     const rechecks = Math.max(0, Math.ceil((deps.config.startupWaitSeconds * 1000 - FIRST_CHECK_MS) / RECHECK_MS));
     let shown = screen;
     let current = status;

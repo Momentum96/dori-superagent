@@ -45,11 +45,11 @@ export const defaultDeps = (): Deps => {
       // The choice is made only when a NEW session is opened: a stored session's own runtime needs none.
       runtimes ??= new Runtimes(
         () => choice().kind,
-        (k) =>
+        (k, engine) =>
           k === "hc"
             ? new HcRuntime(spawnExec)
             : k === "omo-host"
-              ? new OmoHostRuntime(spawnExec)
+              ? new OmoHostRuntime(spawnExec, { engine })
               : new HerdrRuntime(spawnExec, process.env["DORI_HERDR_SESSION"]),
       );
       return runtimes;

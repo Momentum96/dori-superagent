@@ -18,9 +18,9 @@ import { realClock, run } from "./run.ts";
 const USAGE = `dori <command> [options]
 
   launch <key> --title T --brief FILE --done "merged o/r#N; closed o/r#M" [--thread REF] [--model M] [--cwd DIR]
-         [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none] [--activity-path FILE ...] [--dry-run]
+         [--engine omo|mhc] [--wall-minutes N|none] [--token-limit N|none] [--cost-limit N|none] [--activity-path FILE ...] [--dry-run]
   adopt  <key> --pane ID --title T --brief FILE --done "..." [--thread REF]
-  attach <key> [--print]               watch an omo-host lane: an hc terminal running omo's attached TUI client (--print: the command only)
+  attach <key> [--print]               watch a host lane with its engine's TUI in hc (--print: the command only)
   sync   [--write]                     registry vs live panes; read-only unless --write
   boot                                 read-only check after a restart: Slack auth, vanished panes, journals, open worklog items, stale watches
   report <key> --kind milestone|blocker|question|halted|done --text TEXT
@@ -66,9 +66,9 @@ const USAGE = `dori <command> [options]
   lead-inbox import-spool --bot B --spool DIR [--loop]
                                        put the spool's *.json envelopes oldest first; invalid ones go to DIR/rejected/
   lead-pump --bot B [--once]           deliver the inbox to the lead named in lead/B.json; write health/B.json
-  lead open --bot B --cwd DIR --model M --rules FILE   open the lead host session (rules as its first prompt); lead/B.json generation 1
+  lead open --bot B --cwd DIR --model M --rules FILE [--engine omo|mhc]   open the host lead with rules as its first prompt
   lead open --bot B --cwd DIR --runtime hc --pane ID   record an existing hc terminal as the lead; opens nothing
-  lead replace --bot B --rules FILE [--model M]        close the lead, open a new one, generation + 1, old id retired
+  lead replace --bot B --rules FILE [--model M] [--engine omo|mhc]        replace the lead; omit engine to keep the current or pending one
   lead status --bot B [--json]                         lead/B.json`;
 
 const config = await loadConfig().catch((e: unknown) =>
@@ -129,6 +129,7 @@ const flags = parseArgs({
     "state-dir": { type: "string" },
     rules: { type: "string" },
     runtime: { type: "string" },
+    engine: { type: "string" },
     once: { type: "boolean" },
   },
 });
@@ -145,6 +146,12 @@ const commands: Readonly<Record<string, Command>> = {
 const handler = Object.hasOwn(commands, command) ? commands[command] : undefined;
 
 try {
+  if (
+    flags.values["engine"] !== undefined &&
+    command !== "launch" &&
+    !(command === "lead" && ["open", "replace"].includes(flags.positionals[0] ?? ""))
+  )
+    die("--engine is only for launch, lead open or lead replace", 2);
   if (handler) await handler(makeCli(command, rest, flags, config, deps));
   else {
     console.log(USAGE);

@@ -1,6 +1,6 @@
 /** dori launch, adopt, attach, claim-done, object-done, close, pause and resume. */
 import { OmoHostRuntime } from "../../../../src/runtime/omo-host/index.ts";
-import { type Command, die } from "./cli-context.ts";
+import { type Command, die, engineOption } from "./cli-context.ts";
 import { claimDone, closeLane, objectDone } from "./done-flow.ts";
 import { adoptLane } from "./launch-adopt.ts";
 import { type LaunchInput, launchLane, prepareLaunch } from "./launch.ts";
@@ -24,6 +24,7 @@ const launch: Command = async ({ key, opt, need, ceiling, strings, values, deps 
     ...(thread !== undefined ? { thread } : {}),
     ...(model !== undefined ? { model } : {}),
     ...(cwd !== undefined ? { cwd } : {}),
+    engine: engineOption(opt("engine")),
     budget: {
       ...(wallMinutes !== undefined ? { wallMinutes } : {}),
       ...(tokens !== undefined ? { tokens } : {}),

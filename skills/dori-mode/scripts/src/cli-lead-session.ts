@@ -2,7 +2,7 @@
 import { resolve } from "node:path";
 
 import type { Exec } from "../../../../src/runtime/exec.ts";
-import { type Cli, type Command, die } from "./cli-context.ts";
+import { type Cli, type Command, die, engineOption } from "./cli-context.ts";
 import { bounded } from "./cli-lead-pump.ts";
 import { fill } from "./config.ts";
 import { LeadInboxError, parseBot } from "./lead-envelope.ts";
@@ -47,6 +47,7 @@ const lead: Command = async (cli) => {
           bot,
           cwd: resolve(need("cwd")),
           runtime,
+          engine: engineOption(opt("engine")),
           ...(model === undefined ? {} : { model }),
           ...(rulesFile === undefined ? {} : { rulesFile }),
           ...(pane === undefined ? {} : { pane }),
@@ -59,6 +60,7 @@ const lead: Command = async (cli) => {
         const r = await replaceLead(depsOf(cli), {
           bot,
           rulesFile: resolve(need("rules")),
+          engine: engineOption(opt("engine")),
           ...(model === undefined ? {} : { model }),
         });
         for (const id of r.orphans) console.log(`ORPHAN ${id} (open, named like this lead, not in lead.json)`);
@@ -71,7 +73,7 @@ const lead: Command = async (cli) => {
         console.log(
           values["json"]
             ? JSON.stringify(state)
-            : `${state.bot} ${state.state} ${state.runtime} ${state.sessionId} generation=${state.generation}`,
+            : `${state.bot} ${state.state} ${state.runtime} ${state.sessionId} generation=${state.generation}${state.engine === "mhc" ? " engine=mhc" : ""}`,
         );
         return;
       }

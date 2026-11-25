@@ -13,11 +13,13 @@ import type {
   SessionRuntime,
   SubmitResult,
 } from "../types.ts";
-import { asText, hostCall, isReason, OMO, OmoHostError, str } from "./exec.ts";
+import { type HostEngine, hostBinary } from "./engine.ts";
+import { asText, type HostCall, hostCaller, isReason, OmoHostError, str } from "./exec.ts";
 import { footerLines, renderEntries } from "./render.ts";
 import { close, create, goalOf, list, probeOf, selfRef, stateOf } from "./sessions.ts";
 
 export type OmoHostRuntimeOptions = {
+  readonly engine?: HostEngine | undefined;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly log?: (line: string) => void;
   readonly now?: () => number;
@@ -35,12 +37,15 @@ export class OmoHostRuntime implements SessionRuntime {
   private readonly env: Readonly<Record<string, string | undefined>>;
   private readonly log: (line: string) => void;
   private readonly now: () => number;
+  private readonly engine: HostEngine;
+  private readonly binary: string;
+  private readonly call: HostCall;
 
-  constructor(
-    private readonly exec: Exec = spawnExec,
-    options: OmoHostRuntimeOptions = {},
-  ) {
+  constructor(exec: Exec = spawnExec, options: OmoHostRuntimeOptions = {}) {
     this.env = options.env ?? process.env;
+    this.engine = options.engine ?? "omo";
+    this.binary = hostBinary(this.engine, this.env);
+    this.call = hostCaller(exec, this.engine, this.env);
     this.log = options.log ?? ((line) => void process.stderr.write(`${line}\n`));
     this.now = options.now ?? Date.now;
   }
@@ -55,21 +60,21 @@ export class OmoHostRuntime implements SessionRuntime {
   }
 
   create(spec: CreateSpec): Promise<SessionRef> {
-    return create(this.exec, spec);
+    return create(this.call, this.engine, spec);
   }
 
   /** The agent's first prompt (`command` is prompt text here, never a shell command). */
   async start(ref: SessionRef, command: string): Promise<void> {
-    await hostCall(this.exec, ["prompt", ref.id, asText(command)], { redact: asText(command) });
+    await this.call(["prompt", ref.id, asText(command)], { redact: asText(command) });
   }
 
   list(filter?: { readonly group?: string }): Promise<readonly SessionInfo[]> {
-    return list(this.exec, filter?.group);
+    return list(this.call, this.engine, filter?.group);
   }
 
   /** `state`, which resumes a parked session (callers probe only open lanes); a session the host never had is `gone`. */
   async probe(ref: SessionRef): Promise<Probe> {
-    return probeOf(await stateOf(this.exec, ref.id));
+    return probeOf(await stateOf(this.call, ref.id), this.engine);
   }
 
   /**
@@ -78,8 +83,8 @@ export class OmoHostRuntime implements SessionRuntime {
    * a closed session exactly like a parked one, so a screen read must never bring back a lane Dori closed.
    */
   async read(ref: SessionRef, lines: number): Promise<string> {
-    if (!(await list(this.exec, undefined)).some((s) => s.ref.id === ref.id)) return "";
-    const state = await stateOf(this.exec, ref.id);
+    if (!(await this.list()).some((s) => s.ref.id === ref.id)) return "";
+    const state = await stateOf(this.call, ref.id);
     if (state === undefined) return "";
     const entries = await this.tail(ref.id, Math.min(lines * 2, 400));
     const shown = [...renderEntries(entries).slice(-lines), ...footerLines(state, goalOf(state), this.now())];
@@ -94,7 +99,7 @@ export class OmoHostRuntime implements SessionRuntime {
   private async tail(id: string, want: number): Promise<unknown[]> {
     for (let n = want; n >= 1; n = Math.floor(n / 2)) {
       try {
-        const tail = await hostCall(this.exec, ["read", id, "--tail", String(n)]);
+        const tail = await this.call(["read", id, "--tail", String(n)]);
         return Array.isArray(tail["entries"]) ? tail["entries"] : [];
       } catch (e) {
         if (!(e instanceof OmoHostError && e.result.code === 0)) throw e;
@@ -115,7 +120,7 @@ export class OmoHostRuntime implements SessionRuntime {
     try {
       before = await this.probe(ref);
     } catch (e) {
-      this.log(`dori: omo host session state ${ref.id} failed (${messageOf(e)}); holding delivery`);
+      this.log(`dori: ${this.binary} host session state ${ref.id} failed (${messageOf(e)}); holding delivery`);
       return { kind: "not-ready", status: "unknown" };
     }
     if (before.status === "gone") return { kind: "no-agent" };
@@ -126,13 +131,13 @@ export class OmoHostRuntime implements SessionRuntime {
     try {
       if (!working) {
         try {
-          const r = await hostCall(this.exec, ["prompt", ref.id, sent], { redact: sent });
+          const r = await this.call(["prompt", ref.id, sent], { redact: sent });
           return { kind: "delivered", started: r["disposition"] === "started" };
         } catch (e) {
           if (!isReason(e, "busy") || when !== "any") throw e;
         }
       }
-      const r = await hostCall(this.exec, ["steer", ref.id, sent], { redact: sent });
+      const r = await this.call(["steer", ref.id, sent], { redact: sent });
       if (r["streaming"] === false)
         return {
           kind: "ambiguous",
@@ -159,12 +164,12 @@ export class OmoHostRuntime implements SessionRuntime {
 
   /** Escape is `abort` (stops the running turn; a no-op when idle). Enter has nothing to submit. */
   async keys(ref: SessionRef, names: readonly Key[]): Promise<void> {
-    if (names.includes("escape")) await hostCall(this.exec, ["abort", ref.id]);
+    if (names.includes("escape")) await this.call(["abort", ref.id]);
   }
 
   /** A host session has no container: both scopes close the session. */
   close(ref: SessionRef, _scope?: CloseScope): Promise<void> {
-    return close(this.exec, ref.id);
+    return close(this.call, this.binary, ref.id);
   }
 
   /**
@@ -173,9 +178,9 @@ export class OmoHostRuntime implements SessionRuntime {
    * which may not hold omo (a Linux core started by systemd has no ~/.bun/bin).
    */
   async attachArgv(ref: SessionRef): Promise<string[]> {
-    const socket = str((await hostCall(this.exec, ["list"]))["socket"]);
-    if (socket === undefined) throw new Error("omo host session list named no socket");
-    const omo = Bun.which(OMO, { PATH: this.env["PATH"] ?? "" }) ?? OMO;
-    return [omo, "--attach", `unix://${socket}`, "--session", ref.id];
+    const socket = str((await this.call(["list"]))["socket"]);
+    if (socket === undefined) throw new Error(`${this.binary} host session list named no socket`);
+    const binary = Bun.which(this.binary, { PATH: this.env["PATH"] ?? "" }) ?? this.binary;
+    return [binary, "--attach", `unix://${socket}`, "--session", ref.id];
   }
 }

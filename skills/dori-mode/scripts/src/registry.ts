@@ -2,7 +2,7 @@ import { mkdirSync, readdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
 
 import { HerdrRuntime } from "../../../../src/runtime/herdr/index.ts";
-import type { SessionRef } from "../../../../src/runtime/types.ts";
+import { formatRef, type SessionRef } from "../../../../src/runtime/types.ts";
 import type { BudgetLimits } from "./supervision-observe.ts";
 
 export const LANE_KEY = /^[a-z0-9][a-z0-9._-]{1,60}$/;
@@ -82,7 +82,7 @@ export const sessionFields = (ref: SessionRef): Pick<Lane, "sessionRef" | "pane"
 });
 
 const sameSession = (a: SessionRef | undefined, b: SessionRef): boolean =>
-  a !== undefined && a.runtime === b.runtime && a.id === b.id;
+  a !== undefined && formatRef(a) === formatRef(b);
 
 export const statusOf = (lane: Lane): LaneStatus => (lane.closedAt ? "closed" : (lane.status ?? "working"));
 

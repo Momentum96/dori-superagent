@@ -6,18 +6,20 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { type HostEngine, isHostEngine } from "../../../../src/runtime/omo-host/engine.ts";
 import type { SessionRef, SessionRuntime } from "../../../../src/runtime/types.ts";
 import type { LeadInbox } from "./lead-inbox.ts";
 import type { HostStatus } from "./lead-pump-text.ts";
 import type { LeadState } from "./lead-state.ts";
 
 const STUCK_MS = 4 * 60_000;
+type EngineStatus = HostStatus & { readonly engine?: HostEngine };
 
 export type Health = {
   readonly at: string;
   readonly bootTime: string;
   /** null for a lead outside omo's engine host (hc). pid and startedAt name the host last seen ready, also while it is not. */
-  readonly host: HostStatus | null;
+  readonly host: EngineStatus | null;
   readonly lead: {
     readonly generation: number;
     readonly sessionId: string;
@@ -59,7 +61,7 @@ export type HealthInput = {
   readonly lead: LeadState | null;
   readonly ref: SessionRef | undefined;
   readonly runtime: SessionRuntime | undefined;
-  readonly host: HostStatus | null;
+  readonly host: EngineStatus | null;
   readonly watch: Watch;
   readonly seen: (ref: SessionRef, ids: readonly string[]) => Promise<Set<string>>;
 };
@@ -121,7 +123,7 @@ export const pumpHealth = async (h: HealthInput): Promise<Health> => {
 
 export type Seed = {
   readonly at?: number;
-  readonly host?: { readonly pid: number | null; readonly startedAt: string | null };
+  readonly host?: Pick<EngineStatus, "pid" | "startedAt" | "engine">;
   readonly generation?: number;
   readonly lastDeliveredAt?: string;
 };
@@ -134,13 +136,21 @@ export const readSeed = (stateDir: string, bot: string): Seed => {
   } catch {
     return {};
   }
-  const host = o.host as Partial<HostStatus> | null | undefined;
+  const host = o.host as Partial<EngineStatus> | null | undefined;
   const lead = o.lead as { generation?: unknown } | null | undefined;
   const last = (o.inbox as { lastDeliveredAt?: unknown } | undefined)?.lastDeliveredAt;
   const at = typeof o.at === "string" ? Date.parse(o.at) : Number.NaN;
   return {
     ...(Number.isNaN(at) ? {} : { at }),
-    ...(typeof host?.pid === "number" ? { host: { pid: host.pid, startedAt: host.startedAt ?? null } } : {}),
+    ...(typeof host?.pid === "number"
+      ? {
+          host: {
+            pid: host.pid,
+            startedAt: host.startedAt ?? null,
+            ...(isHostEngine(host.engine) ? { engine: host.engine } : {}),
+          },
+        }
+      : {}),
     ...(typeof lead?.generation === "number" ? { generation: lead.generation } : {}),
     ...(typeof last === "string" ? { lastDeliveredAt: last } : {}),
   };

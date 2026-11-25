@@ -1,6 +1,7 @@
 import type { Exec } from "../../../../src/runtime/exec.ts";
 import { HcRuntime } from "../../../../src/runtime/hc/index.ts";
 import { HerdrRuntime } from "../../../../src/runtime/herdr/index.ts";
+import type { HostEngine } from "../../../../src/runtime/omo-host/engine.ts";
 import { OmoHostRuntime } from "../../../../src/runtime/omo-host/index.ts";
 import { Runtimes } from "../../../../src/runtime/registry.ts";
 import { type RuntimeChoice, readRuntimeChoice } from "../../../../src/runtime/select.ts";
@@ -60,7 +61,7 @@ export class ChosenRuntimes extends Runtimes {
 
   constructor(
     pick: () => RuntimeChoice,
-    make: (kind: RuntimeKind) => SessionRuntime,
+    make: (kind: RuntimeKind, engine?: HostEngine) => SessionRuntime,
     private readonly placement: {
       readonly lane?: RuntimeKind | undefined;
       readonly lead?: RuntimeKind | undefined;
@@ -113,14 +114,14 @@ export const runtimesFor = (
     const r = await runner([cmd, ...argv]);
     return { code: r.code, stdout: r.out, stderr: r.err };
   };
-  const make: Record<RuntimeKind, () => SessionRuntime> = {
+  const make: Record<RuntimeKind, (engine?: HostEngine) => SessionRuntime> = {
     herdr: () => new HerdrRuntime(exec, env["DORI_HERDR_SESSION"], { env, sleep: clock.sleep }),
     hc: () => new HcRuntime(exec, { env, sleep: clock.sleep }),
-    "omo-host": () => new OmoHostRuntime(exec, { env }),
+    "omo-host": (engine) => new OmoHostRuntime(exec, { env, engine }),
   };
   return new ChosenRuntimes(
     () => runtimeChoice(config, env),
-    (kind) => make[kind](),
+    (kind, engine) => make[kind](engine),
     { lane: config.laneRuntime, lead: config.leadRuntime },
   );
 };

@@ -76,10 +76,14 @@ export class LeadPump {
     if (lead.state === "switching") return false;
     const ref = this.refOf(lead);
     if (ref === undefined) return this.fail(`lead.json names no ${lead.runtime} session: ${lead.sessionId}`);
+    if (this.sys.noteGeneration(lead)) {
+      this.watch.steered.clear();
+      this.retryAt = 0;
+      this.failures = 0;
+    }
     if (this.d.clock.now() < this.retryAt) return false;
-    if (this.sys.noteGeneration(lead)) this.watch.steered.clear();
     if (ref.runtime === "omo-host" && !(await this.sys.hostReady(lead)))
-      return this.backoff("host_unavailable: omo host status is not ready");
+      return this.backoff(`host_unavailable: ${ref.engine ?? "omo"} host status is not ready`);
     try {
       await this.sys.rulesDue(lead, ref);
     } catch (e) {
@@ -92,7 +96,7 @@ export class LeadPump {
   private refOf(lead: LeadState): SessionRef | undefined {
     if (lead.retired.includes(lead.sessionId))
       throw new RetiredLeadError(`lead.json names retired session ${lead.sessionId} as active; nothing sent`);
-    return parseRef(`${lead.runtime}:${lead.sessionId}`);
+    return parseRef(`${lead.runtime}:${lead.engine === "mhc" ? "mhc:" : ""}${lead.sessionId}`);
   }
 
   private fail(why: string): false {
@@ -114,7 +118,7 @@ export class LeadPump {
   private readonly seen = (ref: SessionRef, ids: readonly string[]): Promise<Set<string>> =>
     transcriptTokens(ref.runtime === "omo-host", ids, {
       screen: () => this.d.runtimes.for(ref).read(ref, 400),
-      transcript: (opts) => this.d.transcript(ref.id, opts),
+      transcript: (opts) => this.d.transcript(ref, opts),
     });
 
   /** Items left without a result: accepted when their token is in the transcript, else sent once more, then left. */

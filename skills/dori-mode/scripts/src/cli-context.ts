@@ -1,4 +1,5 @@
 /** What every dori command handler gets: the parsed flags, the config, the flow deps, and the small helpers. */
+import { type HostEngine, isHostEngine } from "../../../../src/runtime/omo-host/engine.ts";
 import type { DoriConfig } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
 import type { SlackAuth } from "./messenger/slack.ts";
@@ -10,6 +11,9 @@ export const die = (message: string, code = 1): never => {
   console.error(message);
   process.exit(code);
 };
+
+export const engineOption = (value: string | undefined): HostEngine | undefined =>
+  value === undefined || isHostEngine(value) ? value : die("--engine must be omo or mhc", 2);
 
 /** Slack credentials from the environment; the cookie is optional. */
 export const slackAuth = (token: string): SlackAuth => {

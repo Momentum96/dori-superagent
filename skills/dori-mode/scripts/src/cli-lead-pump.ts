@@ -3,7 +3,9 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { uptime } from "node:os";
 import { join } from "node:path";
 
+import { type HostEngine, hostBinary } from "../../../../src/runtime/omo-host/engine.ts";
 import { OmoHostError } from "../../../../src/runtime/omo-host/exec.ts";
+import type { SessionRef } from "../../../../src/runtime/types.ts";
 import { type Command, die } from "./cli-context.ts";
 import { pidAlive } from "./heavy-slot.ts";
 import { type LeadInboxError, parseBot } from "./lead-envelope.ts";
@@ -24,17 +26,18 @@ export const bounded =
 /** `read` straight into a file: a pipe would cut the JSON line at 64 KiB. */
 const readToFile =
   (dir: string) =>
-  async (id: string, opts: { readonly tail: number; readonly messages: boolean }): Promise<string> => {
+  async (ref: SessionRef, opts: { readonly tail: number; readonly messages: boolean }): Promise<string> => {
     const file = join(dir, `.read-${process.pid}.json`);
     const shown = opts.messages ? ["--messages"] : [];
-    const argv = ["host", "session", "read", id, ...shown, "--tail", String(opts.tail), "--json"];
-    const p = Bun.spawn(["omo", ...argv], { stdout: Bun.file(file), stderr: "pipe", timeout: CALL_MS });
+    const argv = ["host", "session", "read", ref.id, ...shown, "--tail", String(opts.tail), "--json"];
+    const binary = hostBinary(ref.engine ?? "omo");
+    const p = Bun.spawn([binary, ...argv], { stdout: Bun.file(file), stderr: "pipe", timeout: CALL_MS });
     const [code, err] = await Promise.all([p.exited, new Response(p.stderr).text()]);
     const out = readFileSync(file, "utf8");
     rmSync(file, { force: true });
     if (code === 0) return out;
     const reason = /"reason":"([a-z_]+)"/.exec(out)?.[1];
-    throw new OmoHostError(argv, { code, stdout: out, stderr: err }, reason, (err || out).trim().slice(0, 200));
+    throw new OmoHostError(argv, { code, stdout: out, stderr: err }, reason, (err || out).trim().slice(0, 200), binary);
   };
 
 /** One pump per bot: a lock directory holding the owner's pid, taken over only from a dead owner. */
@@ -92,7 +95,8 @@ const leadPump: Command = async ({ need, values, config, deps }) => {
       clock: realClock,
       inbox,
       runtimes: runtimesFor(config, process.env, run, realClock),
-      host: async () => parseHostStatus((await run(["omo", "host", "status", "--json"])).out),
+      host: async (engine: HostEngine) =>
+        parseHostStatus((await run([hostBinary(engine), "host", "status", "--json"])).out),
       transcript: readToFile(join(config.stateDir, "lead")),
       run,
       hookArgv: config.hooks.inboxAccepted,

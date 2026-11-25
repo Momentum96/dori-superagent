@@ -9,4 +9,4 @@ export const refText = (ref: SessionRef): string => (ref.runtime === "herdr" ? r
 /** Reads refText back. A stored value no runtime parses is a pane id an older herdr wrote. */
 export const refFromText = (text: string): SessionRef => parseRef(text) ?? { runtime: "herdr", id: text };
 
-export const sameSession = (a: SessionRef, b: SessionRef): boolean => a.runtime === b.runtime && a.id === b.id;
+export const sameSession = (a: SessionRef, b: SessionRef): boolean => formatRef(a) === formatRef(b);

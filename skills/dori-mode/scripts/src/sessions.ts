@@ -29,11 +29,10 @@ export const listSessions = async (
   try {
     void rts.default;
   } catch (e) {
-    if (rts.kinds().length === 0) throw e;
+    if (rts.instances().length === 0) throw e;
   }
   const out: SessionInfo[] = [];
-  for (const kind of rts.kinds()) {
-    const rt = rts.for({ runtime: kind, id: "" });
+  for (const rt of rts.instances()) {
     out.push(...(await rt.list(options.group === undefined ? undefined : { group: options.group })));
   }
   return out;

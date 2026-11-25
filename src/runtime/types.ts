@@ -13,6 +13,8 @@ export type SessionRef = {
   readonly id: string;
   readonly group?: string;
   readonly container?: string;
+  /** Only for host sessions. Missing is the historical omo address. */
+  readonly engine?: HostEngine;
 };
 export type AgentStatus = "idle" | "working" | "blocked" | "error" | "done" | "unknown" | "shell" | "gone";
 export type AgentIdentity = { readonly agent?: string; readonly pgid?: number };
@@ -111,12 +113,15 @@ const KINDS = Object.keys(ID_SHAPES) as RuntimeKind[];
 export const parseRef: (text: string) => SessionRef | undefined = (text) => {
   for (const runtime of KINDS) {
     if (!text.startsWith(`${runtime}:`)) continue;
-    const id = text.slice(runtime.length + 1);
-    return ID_SHAPES[runtime].test(id) ? { runtime, id } : undefined;
+    const address = text.slice(runtime.length + 1);
+    const mhc = runtime === "omo-host" && address.startsWith("mhc:");
+    const id = mhc ? address.slice(4) : address;
+    return ID_SHAPES[runtime].test(id) ? { runtime, id, ...(mhc ? { engine: "mhc" } : {}) } : undefined;
   }
   return BARE_HERDR.test(text) ? { runtime: "herdr", id: text } : undefined;
 };
-export const formatRef: (ref: SessionRef) => string = (ref) => `${ref.runtime}:${ref.id}`;
+export const formatRef: (ref: SessionRef) => string = (ref) =>
+  `${ref.runtime}:${ref.runtime === "omo-host" && ref.engine === "mhc" ? "mhc:" : ""}${ref.id}`;
 /**
  * create + start in one call (the root harness path). A start that fails closes the session create just made (scope
  * "session"), so no idle shell is left behind, and rethrows the start error; a close that fails too is one stderr line.
@@ -138,3 +143,4 @@ export const openSession: (rt: SessionRuntime, spec: CreateSpec, command: string
   }
   return ref;
 };
+import type { HostEngine } from "./omo-host/engine.ts";

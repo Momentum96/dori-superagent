@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { FakeOmoHost } from "../../../../test/fake-omo-host.ts";
+import { hostBinary } from "../../../../src/runtime/omo-host/engine.ts";
 import { LeadInbox } from "../src/lead-inbox.ts";
 import { LeadPump } from "../src/lead-pump.ts";
 import { parseHostStatus } from "../src/lead-pump-text.ts";
@@ -21,6 +22,7 @@ export type Rig = ReturnType<typeof makeRig>;
 
 export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
   const host = new FakeOmoHost();
+  const mhc = new FakeOmoHost();
   host.add({ id: LEAD, name: "dori-lead-omo", cwd: "/lead" });
   const hc: HcWorld = { terminals: {} };
   const clock = fakeClock(T0);
@@ -34,6 +36,10 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
     before(argv);
     const [cmd = "", ...rest] = argv;
     if (cmd === "hc") return hcAnswer(hc, argv);
+    if (cmd === "mhc") {
+      const r = await mhc.exec("omo", rest);
+      return { code: r.code, out: r.stdout, err: r.stderr };
+    }
     if (cmd !== "omo") {
       hooks.push([...argv]);
       return { code: hookCode, out: "", err: hookCode === 0 ? "" : "reaction refused" };
@@ -81,11 +87,11 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
         const rts = runtimesFor({ runtime: "hc", leadRuntime: "omo-host" }, {}, runner, clock);
         return { for: (ref: Parameters<typeof rts.for>[0]) => withFault(rts.for(ref)) };
       })(),
-      host: async () => parseHostStatus((await runner(["omo", "host", "status", "--json"])).out),
-      transcript: async (id, { tail, messages }) => {
+      host: async (engine) => parseHostStatus((await runner([hostBinary(engine, {}), "host", "status", "--json"])).out),
+      transcript: async (ref, { tail, messages }) => {
         reads.push(tail);
-        const argv = ["read", id, ...(messages ? ["--messages"] : []), "--tail", String(tail), "--json"];
-        const r = await runner(["omo", "host", "session", ...argv]);
+        const argv = ["read", ref.id, ...(messages ? ["--messages"] : []), "--tail", String(tail), "--json"];
+        const r = await runner([hostBinary(ref.engine ?? "omo", {}), "host", "session", ...argv]);
         if (r.code !== 0) throw new Error(`omo host session read exited ${r.code}: ${r.out || r.err}`);
         return r.out.slice(0, cut);
       },
@@ -96,6 +102,7 @@ export const makeRig = (dir: string, lead: Partial<LeadState> = {}) => {
   const texts = (verb: "prompt" | "steer"): string[] => host.calls.filter((c) => c[0] === verb).map((c) => c[2] ?? "");
   return {
     host,
+    mhc,
     hc,
     clock,
     hooks,

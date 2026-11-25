@@ -1,11 +1,12 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { Exec } from "../exec.ts";
 import type { AgentStatus, CreateSpec, Probe, SessionInfo, SessionRef } from "../types.ts";
-import { hostCall, isReason, rec, str } from "./exec.ts";
+import type { HostEngine } from "./engine.ts";
+import { type HostCall, isReason, rec, str } from "./exec.ts";
 
 const DEFAULT_GROUP = "dori";
+const engineField = (engine: HostEngine): Pick<SessionRef, "engine"> => (engine === "omo" ? {} : { engine });
 
 /** The host has no labels: a Dori session's name carries its group, `dori/<group>/<name>`, so list can filter on it. */
 export const sessionName = (spec: Pick<CreateSpec, "name" | "group">): string =>
@@ -20,11 +21,11 @@ const nameParts = (name: string | undefined): { readonly group: string; readonly
  * session id (it survives a park or a host restart; the routing handle does not), which is also PI_SESSION_ID inside it.
  * A host session runs in the host's own environment, so an env cannot be applied: it is refused, never dropped.
  */
-export async function create(exec: Exec, spec: CreateSpec): Promise<SessionRef> {
+export async function create(call: HostCall, engine: HostEngine, spec: CreateSpec): Promise<SessionRef> {
   const keys = Object.keys(spec.env);
   if (keys.length > 0)
     throw new Error(`an omo-host session cannot carry env (${keys.join(", ")}); pass it in the agent's commands`);
-  const opened = await hostCall(exec, [
+  const opened = await call([
     "open",
     "--cwd",
     spec.cwd,
@@ -33,37 +34,37 @@ export async function create(exec: Exec, spec: CreateSpec): Promise<SessionRef> 
     sessionName(spec),
   ]);
   const id = str(opened["durableSessionId"]);
-  if (id === undefined) throw new Error("omo host session open did not return a durableSessionId");
-  return { runtime: "omo-host", id, group: spec.group ?? DEFAULT_GROUP };
+  if (id === undefined) throw new Error(`${engine} host session open did not return a durableSessionId`);
+  return { runtime: "omo-host", id, group: spec.group ?? DEFAULT_GROUP, ...engineField(engine) };
 }
 
 const rows = (listed: Record<string, unknown>): Record<string, unknown>[] =>
   Array.isArray(listed["sessions"]) ? listed["sessions"].map(rec) : [];
 
 /** The host's live sessions (`list` only observes: it never resumes a parked session or counts as occupancy). */
-export async function list(exec: Exec, group: string | undefined): Promise<SessionInfo[]> {
+export async function list(call: HostCall, engine: HostEngine, group: string | undefined): Promise<SessionInfo[]> {
   const out: SessionInfo[] = [];
-  for (const row of rows(await hostCall(exec, ["list"]))) {
+  for (const row of rows(await call(["list"]))) {
     const id = str(row["durableSessionId"]);
     if (id === undefined || row["archived"] === true) continue;
     const parts = nameParts(str(row["name"]));
     if (group !== undefined && parts?.group !== group) continue;
     const [name, cwd] = [parts?.name ?? str(row["name"]), str(row["cwd"])];
     out.push({
-      ref: { runtime: "omo-host", id, ...(parts === undefined ? {} : { group: parts.group }) },
+      ref: { runtime: "omo-host", id, ...engineField(engine), ...(parts === undefined ? {} : { group: parts.group }) },
       ...(name === undefined ? {} : { name }),
       ...(cwd === undefined ? {} : { cwd }),
       status: row["activity"] === "running" ? "working" : "idle",
-      agent: "omo",
+      agent: engine,
     });
   }
   return out;
 }
 
 /** `state` of one session, or undefined when the host knows no such session. A parked one is resumed by the call. */
-export async function stateOf(exec: Exec, id: string): Promise<Record<string, unknown> | undefined> {
+export async function stateOf(call: HostCall, id: string): Promise<Record<string, unknown> | undefined> {
   try {
-    return rec((await hostCall(exec, ["state", id]))["state"]);
+    return rec((await call(["state", id]))["state"]);
   } catch (e) {
     if (isReason(e, "unknown_session")) return undefined;
     throw e;
@@ -107,13 +108,13 @@ const waitsOnHuman = (state: Record<string, unknown>): boolean =>
     listed(rec(rec(state["lifecycle"])["waitingOn"])["human"]) >
   0;
 
-export function probeOf(state: Record<string, unknown> | undefined): Probe {
+export function probeOf(state: Record<string, unknown> | undefined, engine: HostEngine): Probe {
   if (state === undefined) return { status: "gone", shellInFront: false };
   const [title, cwd] = [str(state["sessionName"]), str(state["cwd"])];
   return {
     ...(waitsOnHuman(state) ? { waitingOnHuman: true } : {}),
     status: statusOf(state),
-    agent: "omo",
+    agent: engine,
     ...(title === undefined ? {} : { title }),
     ...(cwd === undefined ? {} : { cwd }),
     shellInFront: false,
@@ -125,21 +126,25 @@ export function probeOf(state: Record<string, unknown> | undefined): Probe {
  * `close`. `closed: false` means another client (a `dori attach` view) still holds the session, and the host never
  * forces it: the running turn is stopped and the close fails with the way out, so the lane's receipt says not closed.
  */
-export async function close(exec: Exec, id: string): Promise<void> {
+export async function close(call: HostCall, binary: string, id: string): Promise<void> {
   let closed: Record<string, unknown>;
   try {
-    closed = await hostCall(exec, ["close", id]);
+    closed = await call(["close", id]);
   } catch (e) {
     if (isReason(e, "unknown_session")) return;
     throw e;
   }
   if (closed["closed"] !== false) return;
-  await hostCall(exec, ["abort", id]);
-  throw new Error(`omo host session ${id} is still attached by a viewer: quit it, then omo host session close ${id}`);
+  await call(["abort", id]);
+  throw new Error(
+    `${binary} host session ${id} is still attached by a viewer: quit it, then ${binary} host session close ${id}`,
+  );
 }
 
 /** The caller's own host session: PI_SESSION_ID, only inside a host (SENPI_RPC_HOST_PUBLIC_SOCKET set). */
 export function selfRef(env: Readonly<Record<string, string | undefined>>): SessionRef | undefined {
   const [socket, id] = [env["SENPI_RPC_HOST_PUBLIC_SOCKET"], env["PI_SESSION_ID"]];
-  return socket && id ? { runtime: "omo-host", id } : undefined;
+  // The mhc wrapper runs the host and its children under this isolated HOME.
+  const engine = env["HOME"]?.endsWith("/.maho/home") ? "mhc" : "omo";
+  return socket && id ? { runtime: "omo-host", id, ...engineField(engine) } : undefined;
 }

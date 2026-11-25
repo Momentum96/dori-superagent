@@ -5,11 +5,16 @@
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { type HostEngine, isHostEngine } from "../../../../src/runtime/omo-host/engine.ts";
 import { parseBot } from "./lead-envelope.ts";
 
 export type LeadState = {
   readonly bot: string;
   readonly runtime: string;
+  /** Missing on historical omo leads. During replacement this still names the old session's engine. */
+  readonly engine?: HostEngine;
+  /** Host that may hold an orphan from an interrupted cross-engine replacement. */
+  readonly openingEngine?: HostEngine;
   readonly generation: number;
   readonly sessionId: string;
   readonly state: "active" | "switching";
@@ -46,6 +51,12 @@ export const parseLeadState = (raw: unknown): LeadState => {
   const state = o["state"];
   if (state !== "active" && state !== "switching")
     throw new LeadStateError(`lead state state must be active or switching, not ${JSON.stringify(state)}`);
+  const runtime = nonEmpty(o, "runtime");
+  const [engine, openingEngine] = [o["engine"], o["openingEngine"]];
+  if (engine !== undefined && (runtime !== "omo-host" || !isHostEngine(engine)))
+    throw new LeadStateError("lead state engine must be omo or mhc on an omo-host lead");
+  if (openingEngine !== undefined && (runtime !== "omo-host" || state !== "switching" || !isHostEngine(openingEngine)))
+    throw new LeadStateError("lead state openingEngine must be omo or mhc on a switching omo-host lead");
   const generation = o["generation"];
   if (typeof generation !== "number" || !Number.isInteger(generation) || generation < 0)
     throw new LeadStateError("lead state generation must be a whole number, 0 or more");
@@ -66,7 +77,9 @@ export const parseLeadState = (raw: unknown): LeadState => {
     throw new LeadStateError("lead state closeFailures must be a list of {id, at, answer} strings");
   return {
     bot,
-    runtime: nonEmpty(o, "runtime"),
+    runtime,
+    ...(engine === undefined ? {} : { engine }),
+    ...(openingEngine === undefined ? {} : { openingEngine }),
     generation,
     sessionId: nonEmpty(o, "sessionId"),
     state,

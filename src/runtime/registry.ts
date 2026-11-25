@@ -10,11 +10,12 @@ const nonEmpty = (value: string | undefined): string | undefined =>
  */
 export class Runtimes {
   private readonly built = new Map<RuntimeKind, SessionRuntime>();
+  private mhc: SessionRuntime | undefined;
 
   /** `selected` may be lazy: a stored session's runtime (`for(ref)`) never needs the choice to be made. */
   constructor(
     private readonly selected: RuntimeKind | (() => RuntimeKind),
-    private readonly make: (kind: RuntimeKind) => SessionRuntime,
+    private readonly make: (kind: RuntimeKind, engine?: HostEngine) => SessionRuntime,
   ) {}
 
   get default(): SessionRuntime {
@@ -22,12 +23,22 @@ export class Runtimes {
   }
 
   for(ref: SessionRef): SessionRuntime {
+    if (ref.runtime === "omo-host" && ref.engine === "mhc") {
+      this.mhc ??= this.make("omo-host", "mhc");
+      return this.mhc;
+    }
     return this.of(ref.runtime);
   }
 
-  /** The kinds built so far, in first-use order, to enumerate sessions across every runtime in use. */
+  /** The kinds built so far (both engines share the omo-host kind). */
   kinds(): readonly RuntimeKind[] {
-    return [...this.built.keys()];
+    return this.mhc !== undefined && !this.built.has("omo-host")
+      ? [...this.built.keys(), "omo-host"]
+      : [...this.built.keys()];
+  }
+
+  instances(): readonly SessionRuntime[] {
+    return this.mhc === undefined ? [...this.built.values()] : [...this.built.values(), this.mhc];
   }
 
   /**
@@ -56,3 +67,4 @@ export class Runtimes {
     return runtime;
   }
 }
+import type { HostEngine } from "./omo-host/engine.ts";

@@ -8,7 +8,8 @@ import { existsSync } from "node:fs";
 import { isAbsolute } from "node:path";
 
 import type { Exec } from "../../../../src/runtime/exec.ts";
-import { hostCall, isReason, rec, str } from "../../../../src/runtime/omo-host/exec.ts";
+import type { HostEngine } from "../../../../src/runtime/omo-host/engine.ts";
+import { type HostCall, hostCaller, isReason, rec, str } from "../../../../src/runtime/omo-host/exec.ts";
 import { type CloseFailure, type LeadState, readLeadState, writeLeadState } from "./lead-state.ts";
 import { type Clock, iso } from "./run.ts";
 
@@ -34,12 +35,18 @@ export type OpenInput = {
   readonly bot: string;
   readonly cwd: string;
   readonly runtime: "omo-host" | "hc";
+  readonly engine?: HostEngine | undefined;
   readonly model?: string;
   readonly rulesFile?: string;
   readonly pane?: string;
 };
 
-export type ReplaceInput = { readonly bot: string; readonly rulesFile: string; readonly model?: string };
+export type ReplaceInput = {
+  readonly bot: string;
+  readonly rulesFile: string;
+  readonly model?: string;
+  readonly engine?: HostEngine | undefined;
+};
 
 export type ReplaceResult = {
   readonly lead: LeadState;
@@ -59,10 +66,10 @@ const absoluteFile = (flag: string, path: string | undefined): string => {
 };
 
 const openHostSession = async (
-  d: LeadSessionDeps,
+  call: HostCall,
   spec: { readonly bot: string; readonly cwd: string; readonly model: string; readonly rulesFile: string },
 ): Promise<string> => {
-  const opened = await hostCall(d.exec, [
+  const opened = await call([
     "open",
     "--cwd",
     spec.cwd,
@@ -74,7 +81,7 @@ const openHostSession = async (
     `@${spec.rulesFile}`,
   ]);
   const id = str(opened["durableSessionId"]);
-  if (id === undefined) throw new Error("omo host session open did not return a durableSessionId");
+  if (id === undefined) throw new Error("host session open did not return a durableSessionId");
   return id;
 };
 
@@ -88,6 +95,7 @@ export const openLead = async (d: LeadSessionDeps, input: OpenInput): Promise<Le
   const cwd = absoluteFile("cwd", input.cwd);
   const base = { bot: input.bot, generation: 1, state: "active", retired: [], cwd } as const;
   if (input.runtime === "hc") {
+    if (input.engine !== undefined) throw new LeadSessionError("--engine needs --runtime omo-host", 2);
     if (input.pane === undefined) throw new LeadSessionError("--runtime hc needs --pane ID", 2);
     const lead: LeadState = { ...base, runtime: "hc", sessionId: input.pane };
     writeLeadState(d.stateDir, lead);
@@ -95,15 +103,21 @@ export const openLead = async (d: LeadSessionDeps, input: OpenInput): Promise<Le
   }
   if (input.model === undefined) throw new LeadSessionError("--model is required for an omo-host lead", 2);
   const rulesFile = absoluteFile("rules", input.rulesFile);
-  const sessionId = await openHostSession(d, { bot: input.bot, cwd, model: input.model, rulesFile });
-  const lead: LeadState = { ...base, runtime: "omo-host", sessionId, rules: "first-prompt", rulesFile };
+  const engine = input.engine ?? "omo";
+  const sessionId = await openHostSession(hostCaller(d.exec, engine), {
+    bot: input.bot,
+    cwd,
+    model: input.model,
+    rulesFile,
+  });
+  const lead: LeadState = { ...base, runtime: "omo-host", engine, sessionId, rules: "first-prompt", rulesFile };
   writeLeadState(d.stateDir, lead);
   return lead;
 };
 
 /** `provider/id` of the session's model, from `state` (asked only while the session is still the active lead). */
-const modelOf = async (d: LeadSessionDeps, id: string): Promise<string | undefined> => {
-  const model = rec(rec((await hostCall(d.exec, ["state", id]))["state"])["model"]);
+const modelOf = async (call: HostCall, id: string): Promise<string | undefined> => {
+  const model = rec(rec((await call(["state", id]))["state"])["model"]);
   const [provider, name] = [str(model["provider"]), str(model["id"])];
   return provider === undefined || name === undefined ? undefined : `${provider}/${name}`;
 };
@@ -113,19 +127,19 @@ const modelOf = async (d: LeadSessionDeps, id: string): Promise<string | undefin
  * S1) is recorded and alerted, and the replace goes on: the old id is never named again, not even by `state`, which
  * would revive a closed session. A session the host does not know is already gone.
  */
-const closeOld = async (d: LeadSessionDeps, id: string): Promise<CloseFailure | undefined> => {
+const closeOld = async (call: HostCall, clock: Clock, id: string): Promise<CloseFailure | undefined> => {
   let answer: Record<string, unknown>;
   try {
-    answer = await hostCall(d.exec, ["close", id]);
+    answer = await call(["close", id]);
   } catch (e) {
     if (isReason(e, "unknown_session")) return undefined;
     throw e;
   }
-  return answer["closed"] === false ? { id, at: iso(d.clock), answer: JSON.stringify(answer) } : undefined;
+  return answer["closed"] === false ? { id, at: iso(clock), answer: JSON.stringify(answer) } : undefined;
 };
 
-const orphansOf = async (d: LeadSessionDeps, lead: LeadState): Promise<string[]> => {
-  const listed = (await hostCall(d.exec, ["list"]))["sessions"];
+const orphansOf = async (call: HostCall, lead: LeadState): Promise<string[]> => {
+  const listed = (await call(["list"]))["sessions"];
   const known = new Set([lead.sessionId, ...lead.retired]);
   return (Array.isArray(listed) ? listed.map(rec) : [])
     .filter((row) => row["name"] === leadName(lead.bot))
@@ -146,9 +160,12 @@ export const replaceLead = async (d: LeadSessionDeps, input: ReplaceInput): Prom
   if (lead.runtime !== "omo-host")
     throw new LeadSessionError(`dori lead replace handles omo-host leads; this lead runs on ${lead.runtime}`, 3);
   const rulesFile = absoluteFile("rules", input.rulesFile);
+  const oldEngine = lead.engine ?? "omo";
+  const engine = input.engine ?? lead.openingEngine ?? oldEngine;
+  const oldCall = hostCaller(d.exec, oldEngine);
   const old = lead.sessionId;
   const closed = lead.retired.includes(old);
-  const model = input.model ?? (closed ? undefined : await modelOf(d, old));
+  const model = input.model ?? (closed ? undefined : await modelOf(oldCall, old));
   if (model === undefined)
     throw new LeadSessionError(
       closed
@@ -156,10 +173,12 @@ export const replaceLead = async (d: LeadSessionDeps, input: ReplaceInput): Prom
         : `${old} reports no model; pass --model`,
       2,
     );
-  const orphans = lead.state === "switching" ? await orphansOf(d, lead) : [];
-  let switching: LeadState = { ...lead, state: "switching" };
+  const orphans =
+    lead.state === "switching" ? await orphansOf(hostCaller(d.exec, lead.openingEngine ?? oldEngine), lead) : [];
+  const { openingEngine: _opening, ...previous } = lead;
+  let switching: LeadState = { ...previous, state: "switching", openingEngine: engine };
   writeLeadState(d.stateDir, switching);
-  const closeFailure = closed ? undefined : await closeOld(d, old);
+  const closeFailure = closed ? undefined : await closeOld(oldCall, d.clock, old);
   if (!closed) {
     const failures = closeFailure === undefined ? {} : { closeFailures: [...(lead.closeFailures ?? []), closeFailure] };
     switching = { ...switching, retired: [...lead.retired, old], ...failures };
@@ -169,9 +188,16 @@ export const replaceLead = async (d: LeadSessionDeps, input: ReplaceInput): Prom
     await d.alert(
       `dori lead replace (${input.bot}): the host refused to close the old lead ${old} (${closeFailure.answer}); it may still run, and Dori no longer calls it.`,
     );
-  const sessionId = await openHostSession(d, { bot: input.bot, cwd: lead.cwd, model, rulesFile });
+  const sessionId = await openHostSession(hostCaller(d.exec, engine), {
+    bot: input.bot,
+    cwd: lead.cwd,
+    model,
+    rulesFile,
+  });
+  const { openingEngine: _target, ...retired } = switching;
   const next: LeadState = {
-    ...switching,
+    ...retired,
+    engine,
     state: "active",
     sessionId,
     generation: lead.generation + 1,

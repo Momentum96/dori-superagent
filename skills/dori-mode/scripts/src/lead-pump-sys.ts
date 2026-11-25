@@ -4,10 +4,11 @@
  * (after a host restart, at 04:00, and after a compaction, which drops a first-prompt rule: spike S1, check j).
  */
 import type { Runtimes } from "../../../../src/runtime/registry.ts";
+import type { HostEngine } from "../../../../src/runtime/omo-host/engine.ts";
 import type { SessionRef } from "../../../../src/runtime/types.ts";
 import { type ArgvTemplate, fill } from "./config.ts";
 import type { LeadInbox, LeadItem } from "./lead-inbox.ts";
-import type { Seed } from "./lead-pump-health.ts";
+import type { Health, Seed } from "./lead-pump-health.ts";
 import { type HostStatus, idPart, lastCompaction, type ReadTranscript, readTail } from "./lead-pump-text.ts";
 import type { LeadState } from "./lead-state.ts";
 import type { Clock, Runner } from "./run.ts";
@@ -18,10 +19,10 @@ export type PumpDeps = {
   readonly clock: Clock;
   readonly inbox: LeadInbox;
   readonly runtimes: Pick<Runtimes, "for">;
-  /** `omo host status`, for a lead in omo's engine host. */
-  readonly host: () => Promise<HostStatus>;
+  /** `host status` of the lead's engine. */
+  readonly host: (engine: HostEngine) => Promise<HostStatus>;
   /** One `read <id>` of the lead's transcript, written to a file so no pipe cuts its JSON line. */
-  readonly transcript: (id: string, opts: Parameters<ReadTranscript>[0]) => Promise<string>;
+  readonly transcript: (ref: SessionRef, opts: Parameters<ReadTranscript>[0]) => Promise<string>;
   readonly run: Runner;
   readonly hookArgv?: ArgvTemplate | undefined;
   readonly bootTime: string;
@@ -50,11 +51,12 @@ export const rulesRefresh = (inbox: LeadInbox, lead: LeadState, tag: string): vo
 };
 
 export const hostRestarted = (inbox: LeadInbox, lead: LeadState, s: HostStatus): void => {
-  const tag = idPart(s.startedAt ?? `pid-${String(s.pid)}`);
+  const engine = lead.engine ?? "omo";
+  const tag = `${engine === "omo" ? "" : `${engine}:`}${idPart(s.startedAt ?? `pid-${String(s.pid)}`)}`;
   inbox.put({
     id: `sys:host-restart:${tag}`,
     ...SYS,
-    body: `omo's engine host restarted (pid ${String(s.pid)}, started ${String(s.startedAt)}); your session id is unchanged. Check open lanes and replies you owe.`,
+    body: `${engine}'s engine host restarted (pid ${String(s.pid)}, started ${String(s.startedAt)}); your session id is unchanged. Check open lanes and replies you owe.`,
   });
   if (lead.rules === "first-prompt") rulesRefresh(inbox, lead, tag);
 };
@@ -88,8 +90,8 @@ export const runAcceptedHook = async (
 
 /** What the pump remembers between ticks to put its sys: items: the host it last saw ready, the lead generation, when it last looked for 04:00 and for a compaction. Seeded from the last pump's health file. */
 export class SysItems {
-  hostNow: HostStatus | null = null;
-  private known: { readonly pid: number | null; readonly startedAt: string | null } | undefined;
+  hostNow: Health["host"] = null;
+  private known: Seed["host"];
   private generation: number | undefined;
   private refreshCheckedAt: number;
   private compactionScanAt = Number.NEGATIVE_INFINITY;
@@ -113,11 +115,14 @@ export class SysItems {
 
   /** false while omo's engine host is not ready; a new pid or start time queues sys:host-restart. */
   async hostReady(lead: LeadState): Promise<boolean> {
-    const s = await this.d.host();
-    this.hostNow = s.ready ? s : { ...s, ...this.known };
+    const engine = lead.engine ?? "omo";
+    if ((this.known?.engine ?? "omo") !== engine) this.known = undefined;
+    const identity = engine === "omo" ? {} : { engine };
+    const s = await this.d.host(engine);
+    this.hostNow = { ...s, ...(!s.ready ? this.known : undefined), ...identity };
     if (!s.ready) return false;
     const changed = this.known !== undefined && (this.known.pid !== s.pid || this.known.startedAt !== s.startedAt);
-    this.known = { pid: s.pid, startedAt: s.startedAt };
+    this.known = { pid: s.pid, startedAt: s.startedAt, ...identity };
     if (changed) hostRestarted(this.d.inbox, lead, s);
     return true;
   }
@@ -136,7 +141,7 @@ export class SysItems {
     this.compactionScanAt = now;
     const row = (await this.d.runtimes.for(ref).list()).find((s) => s.ref.id === ref.id);
     if (row?.status !== "idle") return;
-    const tail = await readTail((opts) => this.d.transcript(ref.id, opts), false);
+    const tail = await readTail((opts) => this.d.transcript(ref, opts), false);
     const compaction = tail === undefined ? undefined : lastCompaction(tail);
     if (compaction === undefined) return;
     const given = this.d.inbox

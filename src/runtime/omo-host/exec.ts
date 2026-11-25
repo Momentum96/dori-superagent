@@ -2,8 +2,7 @@
 // its exit code classifies the outcome (0 ok, 1 failed, 2 usage, 3 refused by the host).
 import type { Exec, ExecResult } from "../exec.ts";
 import { ToolError } from "../exec.ts";
-
-export const OMO = "omo";
+import { type HostEngine, hostBinary } from "./engine.ts";
 
 /**
  * An `omo host session` call that exited non-zero. `reason` is the payload's stable reason (`unknown_session`, `busy`,
@@ -17,9 +16,10 @@ export class OmoHostError extends ToolError {
     result: ExecResult,
     readonly reason: string | undefined,
     readonly detail: string,
+    binary = "omo",
   ) {
-    super(argv, result, OMO);
-    this.message = `omo ${argv.join(" ")} failed (${result.code})${reason === undefined ? "" : ` ${reason}`}: ${detail}`;
+    super(argv, result, binary);
+    this.message = `${binary} ${argv.join(" ")} failed (${result.code})${reason === undefined ? "" : ` ${reason}`}: ${detail}`;
   }
 }
 
@@ -42,21 +42,29 @@ const parse = (text: string): Record<string, unknown> | undefined => {
  */
 export const asText = (text: string): string => (/^[@-]/.test(text) ? ` ${text}` : text);
 
-export async function hostCall(
-  exec: Exec,
+export type HostCall = (
   argv: readonly string[],
-  options: { readonly redact?: string } = {},
-): Promise<Record<string, unknown>> {
-  const full = ["host", "session", ...argv, "--json"];
-  const result = await exec(OMO, full);
-  const payload = parse(result.stdout);
-  if (result.code === 0 && payload !== undefined) return payload;
-  const shown = options.redact === undefined ? full : full.map((a) => (a === options.redact ? "<text>" : a));
-  const raw = (result.stderr || result.stdout).trim();
-  const detail = str(payload?.["detail"]) ?? (raw || "no output");
-  const scrubbed = options.redact ? detail.replaceAll(options.redact, "<text>") : detail;
-  throw new OmoHostError(shown, result, str(payload?.["reason"]), scrubbed);
-}
+  options?: { readonly redact?: string },
+) => Promise<Record<string, unknown>>;
+
+export const hostCaller = (
+  exec: Exec,
+  engine: HostEngine,
+  env?: Readonly<Record<string, string | undefined>>,
+): HostCall => {
+  const binary = hostBinary(engine, env);
+  return async (argv, options = {}) => {
+    const full = ["host", "session", ...argv, "--json"];
+    const result = await exec(binary, full);
+    const payload = parse(result.stdout);
+    if (result.code === 0 && payload !== undefined) return payload;
+    const shown = options.redact === undefined ? full : full.map((a) => (a === options.redact ? "<text>" : a));
+    const raw = (result.stderr || result.stdout).trim();
+    const detail = str(payload?.["detail"]) ?? (raw || "no output");
+    const scrubbed = options.redact ? detail.replaceAll(options.redact, "<text>") : detail;
+    throw new OmoHostError(shown, result, str(payload?.["reason"]), scrubbed, binary);
+  };
+};
 
 export const isReason = (e: unknown, ...reasons: readonly string[]): e is OmoHostError =>
   e instanceof OmoHostError && e.reason !== undefined && reasons.includes(e.reason);
