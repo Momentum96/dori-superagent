@@ -8,6 +8,7 @@ import { sendVerified } from "./sessions.ts";
 import { checkDone, type SignalIo } from "./signals.ts";
 import { Supervision } from "./supervision.ts";
 import { Lessons, type LessonInput } from "./lessons.ts";
+import { changedConfig, configWarning } from "./config-guard.ts";
 
 export type FlowDeps = {
   readonly run: Runner;
@@ -35,13 +36,14 @@ export const claimDone = async (deps: FlowDeps, lane: Lane, evidence: string): P
     withStatus(lane, "done-claimed", evidence, at, { claim: { at, evidence, emitted: false } }),
   );
   const ref = sessionOf(lane);
+  const changed = changedConfig(lane.configSnapshot);
   if (ref) {
     const closesAt = new Date(deps.clock.now() + windowMs(deps)).toISOString().slice(11, 16);
     await sendVerified(
       runtimesOf(deps),
       deps.clock,
       ref,
-      `[LEAD] done claim recorded for ${lane.key}: this lane closes automatically at ${closesAt}Z (${deps.config.closeAfterMin} minutes) unless the lead objects with reasons. Stay idle until then; an objection arrives here as [LEAD] not done.`,
+      `[LEAD] done claim recorded for ${lane.key}: this lane closes automatically at ${closesAt}Z (${deps.config.closeAfterMin} minutes) unless the lead objects with reasons. Stay idle until then; an objection arrives here as [LEAD] not done.${changed.length ? ` ${configWarning(changed)}` : ""}`,
     );
   }
   return `LANE_DONE_CLAIMED ${lane.key} ${lane.pane ?? "-"} ${evidence}`;
@@ -131,6 +133,8 @@ export const closeLane = async (
   } catch (error) {
     lines.push(`COST ${lane.key} not recorded: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const changed = changedConfig(lane.configSnapshot);
+  if (changed.length) lines.push(configWarning(changed));
   const cleanup: string[] = [];
   const hook = deps.config.hooks.threadDone;
   if (hook && lane.thread !== "none") {
@@ -145,7 +149,7 @@ export const closeLane = async (
     cleanup.push(r.code === 0 ? `worktree ${wt} removed` : `worktree ${wt} kept: ${r.err.slice(0, 120)}`);
   }
   const at = iso(deps.clock);
-  const receipt = { checks, note, cleanup };
+  const receipt = { checks, note, cleanup, ...(changed.length ? { configChanged: changed } : {}) };
   await deps.registry.write(withStatus(lane, "closed", note, at, { closedAt: at, receipt }));
   // A host session is resumed by any read that names it, so one read between its close and this write (a launch's
   // startup check) brings it back: close it once more now that every reader sees the lane closed.

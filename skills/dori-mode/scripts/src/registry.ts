@@ -33,6 +33,8 @@ export type Lane = {
   readonly cwd?: string;
   readonly model?: string;
   readonly worktrees?: readonly string[];
+  /** Digests of the shared agent configuration at launch; the close names any file that differs. */
+  readonly configSnapshot?: Readonly<Record<string, string>>;
   readonly status?: LaneStatus;
   readonly claim?: Claim;
   readonly objection?: Objection;

@@ -100,3 +100,13 @@ export const startupScreen = (rts: Runtimes, ref: SessionRef): Promise<string> =
 export const startupFailure = (screen: string): string | null => {
   return firstFailure(screen.replace(EXTENSION_WARNING, ""));
 };
+
+export const lastLines = (screen: string): string =>
+  screen
+    .split("\n")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .slice(-3)
+    .join(" / ")
+    .replace(/\/(Users|home|Volumes|private)\/\S+/g, "(local path)")
+    .slice(0, 240) || "(blank)";

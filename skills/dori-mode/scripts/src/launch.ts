@@ -14,7 +14,8 @@ import { doneSyntaxErrors } from "./signals.ts";
 import type { BudgetLimits } from "./supervision-observe.ts";
 import { Lessons, renderLessons } from "./lessons.ts";
 import { laneLaunchEnv, TokenFileError } from "./slack-token.ts";
-import { startupFailure } from "./startup-screen.ts";
+import { lastLines, startupFailure } from "./startup-screen.ts";
+import { snapshotConfig } from "./config-guard.ts";
 import { launchFinished, launchScreen, launchStatus } from "./launch-finished.ts";
 import { closedMeanwhile } from "./sessions.ts";
 
@@ -157,7 +158,7 @@ const startLane = async (
   }
   const pane = ref.id;
   // Registered before the agent starts: dori report refuses an unknown key, so a fast lane's first report would be lost.
-  const lane: Lane = { ...draft, ...sessionFields(ref) };
+  const lane: Lane = { ...draft, ...sessionFields(ref), configSnapshot: snapshotConfig(deps.env) };
   await deps.registry.write(lane);
   // The launch is an activity record, not a report: it starts the journal (so the screen is watched for a stall) but is
   // never posted to the thread as if the agent had reported.
@@ -238,13 +239,3 @@ const startupCheck = async (
   const why = error ? `status lookup failed: ${error}` : `no ready agent status (${status ?? "none"})`;
   return `STARTUP_UNCONFIRMED ${key} ${pane}: ${why}; last lines: ${lastLines(screen)}`;
 };
-
-const lastLines = (screen: string): string =>
-  screen
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .slice(-3)
-    .join(" / ")
-    .replace(/\/(Users|home|Volumes|private)\/\S+/g, "(local path)")
-    .slice(0, 240) || "(blank)";
