@@ -11,6 +11,7 @@ import { messengerCommands, messengerErrors } from "./cli-messenger.ts";
 import { opsCommands } from "./cli-ops.ts";
 import { ConfigError, loadConfig } from "./config.ts";
 import type { FlowDeps } from "./done-flow.ts";
+import { HeavyAdmissionError } from "./heavy-lock.ts";
 import { LaunchError } from "./launch.ts";
 import { Registry } from "./registry.ts";
 import { realClock, run } from "./run.ts";
@@ -52,7 +53,8 @@ const USAGE = `dori <command> [options]
                                        else bot B's local inbox, default omo), each once; DIR = whose lane journals to read
   dead-panes [--loop MIN]              print DEAD_PANE <id> for stopped agent panes
   guard [--loop MIN]                   host load, memory, disk and pane-count alerts
-  heavy <label> -- <command ...>       run a heavy command when a slot is free and load is low
+  heavy <label> -- <command ...>       run a heavy command when free memory and load allow one more
+  heavy --status                       the current dynamic heavy limit, why, and the held slots
   can-launch                           exit 0 if the host has room for a new lane, else print why and exit 4
   send <slack|telegram|discord> --to TARGET --text TEXT [--thread ID] [--edit ID]
                                        post or edit a message (tokens from DORI_SLACK_TOKEN or the file DORI_SLACK_TOKEN_FILE names, DORI_TELEGRAM_TOKEN, DORI_DISCORD_TOKEN)
@@ -158,7 +160,11 @@ try {
     process.exit(command ? 1 : 0);
   }
 } catch (e) {
-  if (e instanceof LaunchError || [...messengerErrors, ...journalErrors].some((type) => e instanceof type))
+  if (
+    e instanceof LaunchError ||
+    e instanceof HeavyAdmissionError ||
+    [...messengerErrors, ...journalErrors].some((type) => e instanceof type)
+  )
     die((e as Error).message);
   throw e;
 }

@@ -71,7 +71,7 @@ test("launch opens the lane in the host with its model, sends the launch prompt,
   expect(r.lane.sessionRef).toEqual({ runtime: "omo-host", id: "00000000-0000-4000-8000-000000000001", group: "g1" });
   expect(world.calls.filter((c) => c[0] === "hc" || c[0] === "herdr")).toEqual([]);
   expect(readFileSync(brief, "utf8")).toMatch(/claim-done fix-x/);
-  expect(readFileSync(brief, "utf8")).toMatch(/env DORI_CONFIG=\S+ bun \S+cli\.ts report fix-x/);
+  expect(readFileSync(brief, "utf8")).toMatch(/env DORI_CONFIG=\S+ DORI_STATE_DIR=\S+ bun \S+cli\.ts report fix-x/);
   // The lane has no terminal id to infer the lead's runtime from, so the footer names the exact argv.
   expect(readFileSync(brief, "utf8")).toContain('["hc","send","lead:p1","--","[REPORT] ..."]');
 });

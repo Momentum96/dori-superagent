@@ -16,13 +16,17 @@ const ENV_ID = /(?:^|\s)PI_SESSION_ID=([0-9a-f-]{36})(?:\s|$)/;
 const SESSION_FILE = /^(\d{4}-\d\d-\d\dT\d\d)-(\d\d)-(\d\d)-(\d{3})Z_([0-9a-f-]{36})\.jsonl$/;
 const START_WINDOW_MS = 180_000;
 
-export const procTable = async (run: Runner): Promise<Proc[]> =>
-  (await run(["ps", "-A", "-o", "pid=,ppid=,command="])).out.split("\n").flatMap((line) => {
+export const PS_ARGV = ["ps", "-A", "-o", "pid=,ppid=,command="] as const;
+
+export const parseProcs = (out: string): Proc[] =>
+  out.split("\n").flatMap((line) => {
     const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
     return m ? [{ pid: Number(m[1]), ppid: Number(m[2]), cmd: m[3] ?? "" }] : [];
   });
 
-const descendants = (table: readonly Proc[], root: number): Proc[] => {
+export const procTable = async (run: Runner): Promise<Proc[]> => parseProcs((await run(PS_ARGV)).out);
+
+export const descendants = (table: readonly Proc[], root: number): Proc[] => {
   const byParent = new Map<number, Proc[]>();
   for (const p of table) byParent.set(p.ppid, [...(byParent.get(p.ppid) ?? []), p]);
   const out: Proc[] = [];

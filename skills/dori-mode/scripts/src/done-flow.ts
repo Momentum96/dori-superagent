@@ -6,6 +6,7 @@ import { type Lane, type Registry, sessionOf, statusOf, withStatus } from "./reg
 import { type ChosenRuntimes, type Clock, iso, type Runner, runtimesOf } from "./run.ts";
 import { sendVerified } from "./sessions.ts";
 import { checkDone, type SignalIo } from "./signals.ts";
+import { laneProcesses, stopLeftovers } from "./lane-processes.ts";
 import { Supervision } from "./supervision.ts";
 import { Lessons, type LessonInput } from "./lessons.ts";
 import { changedConfig, configWarning } from "./config-guard.ts";
@@ -142,7 +143,12 @@ export const closeLane = async (
     cleanup.push(r.code === 0 ? "thread marked done" : `thread hook failed: ${r.err.slice(0, 160)}`);
   }
   const ref = sessionOf(lane);
-  if (ref) cleanup.push(await closeSession(deps, ref));
+  if (ref) {
+    const procs = await laneProcesses(runtimesOf(deps), deps.run, ref);
+    const closed = await closeSession(deps, ref);
+    cleanup.push(closed);
+    if (!closed.endsWith("not closed")) cleanup.push(await stopLeftovers(deps.run, procs));
+  }
   const root = lane.cwd ?? deps.config.defaultCwd;
   for (const wt of (await discoverWorktrees(lane, deps.run, [deps.config.defaultCwd])).filter(exists)) {
     const r = await deps.run(["git", "-C", root, "worktree", "remove", wt]);

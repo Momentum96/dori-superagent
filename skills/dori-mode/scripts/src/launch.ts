@@ -75,7 +75,11 @@ const laneEnv = (): Record<string, string> => {
 // config's absolute path, rides in every dori command its footer names instead.
 const hostedCli = (deps: FlowDeps, engine: HostEngine | undefined): string | undefined =>
   engine !== undefined || deps.config.laneRuntime === "omo-host"
-    ? cliCommand(undefined, { ...laneEnv(), DORI_CONFIG: resolve(configPath()) })
+    ? cliCommand(undefined, {
+        ...laneEnv(),
+        DORI_CONFIG: resolve(configPath()),
+        DORI_STATE_DIR: resolve(deps.config.stateDir),
+      })
     : undefined;
 
 // The runtime the lead's session is on (`leadRuntime`, else the default); unknown when no runtime can be chosen (the
@@ -149,7 +153,8 @@ const startLane = async (
     const runtime =
       input.engine === undefined ? rts.lane : rts.for({ runtime: "omo-host", id: "", engine: input.engine });
     hosted = AGENT_SESSION_KINDS.has(runtime.kind);
-    const env = hosted ? {} : laneEnv();
+    // #197: the state dir may come from the config file, so the lane gets it absolute (DORI_CONFIG: laneLaunchEnv).
+    const env = hosted ? {} : { ...laneEnv(), DORI_STATE_DIR: resolve(deps.config.stateDir) };
     const spec = { name: input.key, role: "lane", container: "tab", cwd, env, model } as const;
     ref = await runtime.create(group === undefined ? spec : { ...spec, group });
   } catch (e) {

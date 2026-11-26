@@ -37,7 +37,10 @@ export const launchStatus = async (rts: Runtimes, ref: SessionRef): Promise<{ st
     if (!found) return { status: "gone" };
     if (found.status !== undefined) return { status: found.status };
     const probed = (await rts.for(ref).probe(ref)).status;
-    return probed === "shell" || probed === "gone" ? { status: probed } : {};
+    // `unknown` stays unreported (the screen gave no verdict either); any other probed status is evidence enough —
+    // on hc it is the screen classification for agents that never emit OSC 7501 (herdr's list always carries a
+    // status, so this fallback only ever runs for hc terminals).
+    return probed === "unknown" ? {} : { status: probed };
   } catch (e) {
     if (isKind(e, "not_found")) return { status: "gone" };
     return { error: e instanceof Error ? e.message : String(e) };

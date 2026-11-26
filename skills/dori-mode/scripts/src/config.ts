@@ -55,7 +55,10 @@ export type DoriConfig = {
   readonly nudgeAfterMin: number;
   readonly postAfterMin: number;
   readonly closeAfterMin: number;
-  readonly heavySlots: number;
+  /** `dori heavy` admits by free memory and load between these two; the old `heavySlots` key is read as the ceiling. */
+  readonly heavyMinSlots: number;
+  readonly heavyMaxSlots: number;
+  readonly heavyJobMemGb: number;
   readonly heavyMaxLoad: number;
   readonly deadPanePatterns: readonly string[];
   readonly guard: GuardThresholds;
@@ -81,7 +84,9 @@ export const defaultConfig = (home = homedir()): DoriConfig => ({
   nudgeAfterMin: 15,
   postAfterMin: 20,
   closeAfterMin: 5,
-  heavySlots: 1,
+  heavyMinSlots: 1,
+  heavyMaxSlots: 4,
+  heavyJobMemGb: 4,
   heavyMaxLoad: 80,
   deadPanePatterns: ["has stopped", "no suitable jobs"],
   guard: { loadAlert: 150, loadOk: 80, memFreeMinPct: 20, diskFreeMinGb: 50, panesMax: 20 },
@@ -143,6 +148,7 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
       raw.startupWaitSeconds >= 0
         ? raw.startupWaitSeconds
         : base.startupWaitSeconds,
+    heavyMaxSlots: raw.heavyMaxSlots ?? (raw as { heavySlots?: number }).heavySlots ?? base.heavyMaxSlots,
     supervision: {
       ...base.supervision,
       ...raw.supervision,
@@ -157,6 +163,13 @@ export const loadConfig = async (path = configPath(), home = homedir()): Promise
     if (value != null && (typeof value !== "number" || !Number.isFinite(value) || value < 0))
       throw new ConfigError(`invalid supervision ${name}: expected a nonnegative number or null`);
   }
+  for (const name of ["heavyMinSlots", "heavyMaxSlots", "heavyJobMemGb", "heavyMaxLoad"] as const) {
+    const value = merged[name];
+    if (typeof value !== "number" || !Number.isFinite(value) || value < (name === "heavyMinSlots" ? 0 : 1))
+      throw new ConfigError(`invalid ${name}: expected a number of at least ${name === "heavyMinSlots" ? 0 : 1}`);
+  }
+  if (merged.heavyMinSlots > merged.heavyMaxSlots)
+    throw new ConfigError("invalid heavyMinSlots: above heavyMaxSlots (or the old heavySlots)");
   for (const [key, budget] of Object.entries(merged.supervision.lanes ?? {})) {
     for (const [name, value] of Object.entries(budget)) {
       if (value != null && (typeof value !== "number" || !Number.isFinite(value) || value < 0))

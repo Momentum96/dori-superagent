@@ -137,3 +137,13 @@ test("leadInbox, leadInboxArgv and machine load when well formed and stop the lo
     await expect(loadConfig(path, "/home/ana")).rejects.toThrow(new RegExp(`invalid ${name}:`));
   }
 });
+
+test("the old heavySlots key is read as the heavy ceiling, and heavyMaxSlots wins when both are set", async () => {
+  const path = join(state.dir, "config.json");
+  await Bun.write(path, JSON.stringify({ heavySlots: 3 }));
+  expect(await loadConfig(path, "/home/ana")).toMatchObject({ heavyMinSlots: 1, heavyMaxSlots: 3, heavyJobMemGb: 4 });
+  await Bun.write(path, JSON.stringify({ heavySlots: 3, heavyMaxSlots: 5 }));
+  expect((await loadConfig(path, "/home/ana")).heavyMaxSlots).toBe(5);
+  await Bun.write(path, JSON.stringify({ heavySlots: 1, heavyMinSlots: 2 }));
+  await expect(loadConfig(path, "/home/ana")).rejects.toThrow("invalid heavyMinSlots");
+});
